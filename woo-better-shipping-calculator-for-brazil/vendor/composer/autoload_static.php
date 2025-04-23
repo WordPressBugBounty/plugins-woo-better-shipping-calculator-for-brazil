@@ -4,24 +4,29 @@
 
 namespace Composer\Autoload;
 
-class ComposerStaticInit97e3197d732e8a6b37307b88a400abd2
+class ComposerStaticInit8ee9bef9805cf2508b18646fb55133e2
 {
     public static $prefixLengthsPsr4 = array (
-        'W' => 
+        'L' => 
         array (
-            'WC_Better_Shipping_Calculator_for_Brazil\\Core\\' => 46,
-            'WC_Better_Shipping_Calculator_for_Brazil\\' => 41,
+            'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => 51,
+            'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => 49,
+            'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' => 46,
         ),
     );
 
     public static $prefixDirsPsr4 = array (
-        'WC_Better_Shipping_Calculator_for_Brazil\\Core\\' => 
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => 
         array (
-            0 => __DIR__ . '/../..' . '/core',
+            0 => __DIR__ . '/../..' . '/Public',
         ),
-        'WC_Better_Shipping_Calculator_for_Brazil\\' => 
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => 
         array (
-            0 => __DIR__ . '/../..' . '/classes',
+            0 => __DIR__ . '/../..' . '/Includes',
+        ),
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' => 
+        array (
+            0 => __DIR__ . '/../..' . '/Admin',
         ),
     );
 
@@ -32,9 +37,9 @@ class ComposerStaticInit97e3197d732e8a6b37307b88a400abd2
     public static function getInitializer(ClassLoader $loader)
     {
         return \Closure::bind(function () use ($loader) {
-            $loader->prefixLengthsPsr4 = ComposerStaticInit97e3197d732e8a6b37307b88a400abd2::$prefixLengthsPsr4;
-            $loader->prefixDirsPsr4 = ComposerStaticInit97e3197d732e8a6b37307b88a400abd2::$prefixDirsPsr4;
-            $loader->classMap = ComposerStaticInit97e3197d732e8a6b37307b88a400abd2::$classMap;
+            $loader->prefixLengthsPsr4 = ComposerStaticInit8ee9bef9805cf2508b18646fb55133e2::$prefixLengthsPsr4;
+            $loader->prefixDirsPsr4 = ComposerStaticInit8ee9bef9805cf2508b18646fb55133e2::$prefixDirsPsr4;
+            $loader->classMap = ComposerStaticInit8ee9bef9805cf2508b18646fb55133e2::$classMap;
 
         }, null, ClassLoader::class);
     }
