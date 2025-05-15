@@ -79,9 +79,12 @@ class WcBetterShippingCalculatorForBrazilPublic
          * class.
          */
 
-        $cep_required = get_option('woo_better_calc_cep_required', 'no');
-        if ($cep_required === 'yes') {
-            wp_enqueue_style($this->plugin_name, plugin_dir_url(__FILE__) . 'css/WcBetterShippingCalculatorForBrazilPublic.css', array(), $this->version, 'all');
+        if (has_block('woocommerce/cart')) {
+            $cep_required = get_option('woo_better_calc_cep_required', 'yes');
+
+            if ($cep_required === 'yes') {
+                wp_enqueue_style($this->plugin_name, plugin_dir_url(__FILE__) . 'css/WcBetterShippingCalculatorForBrazilPublic.css', array(), $this->version, 'all');
+            }
         }
     }
 
@@ -106,7 +109,7 @@ class WcBetterShippingCalculatorForBrazilPublic
          */
         $disabled_shipping = get_option('woo_better_calc_disabled_shipping', 'default');
         $hidden_address = get_option('woo_better_hidden_cart_address', 'yes');
-        $cep_required = get_option('woo_better_calc_cep_required', 'no');
+        $cep_required = get_option('woo_better_calc_cep_required', 'yes');
 
         if (has_block('woocommerce/cart')) {
 
@@ -123,8 +126,7 @@ class WcBetterShippingCalculatorForBrazilPublic
                     $woo_version_type = version_compare(WC_VERSION, '9.6.0', '>=') ? 'woo-block' : 'woo-class';
 
                     wp_localize_script($this->plugin_name . '-gutenberg-cep-field', 'WooBetterData', [
-                        'wooVersion' => $woo_version_type,
-                        'hiddenAddress' => $hidden_address,
+                        'wooVersion' => $woo_version_type
                     ]);
                 }
             }
