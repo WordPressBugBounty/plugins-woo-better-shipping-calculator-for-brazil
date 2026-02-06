@@ -1,5 +1,21 @@
 document.addEventListener('DOMContentLoaded', function () {
+
     const WooBetterData = window.WooBetterData || {};
+
+    // --- Lógica para sincronizar CEP do carrinho com cache personalizado ---
+    const cartCep = WooBetterData.cart_cep || '';
+    const lastPostcode = getLastUsedPostcode();
+    if (cartCep && cartCep !== lastPostcode) {
+        // Reseta cache e faz nova consulta usando o CEP do carrinho
+        invalidateCache();
+        setLastUsedPostcode(cartCep);
+        sendCEP(cartCep, true);
+    }
+
+    // Configura listener para mudanças em produtos variáveis
+    setupVariationChangeListener();
+
+    let font_class = WooBetterData.inputStyles.fontClass || '';
     let containerFound = false;
     let blockPosition = 'h1[class*="title"]'
     let postcodeValue = '';
@@ -12,6 +28,238 @@ document.addEventListener('DOMContentLoaded', function () {
         const parentContainer = document.createElement('div');
         parentContainer.classList.add('woo-better-parent-container');
         return parentContainer;
+    }
+
+    function invalidateCache() {
+        // Função de reset do cache customizado
+        try {
+            localStorage.removeItem('woo_better_calc_custom_cache');
+        } catch (e) {
+            // Ignora erro de localStorage
+        }
+    }
+
+    function getCurrentVariationId() {
+        const variationForm = document.querySelector('.variations_form');
+        if (variationForm) {
+            const variationInput = variationForm.querySelector('input[name="variation_id"]');
+            if (variationInput) {
+                if (variationInput.value) {
+                    return variationInput.value;
+                }
+            }
+        }
+        return 0;
+    }
+
+    function isVariableProduct() {
+        const isVariable = document.querySelector('.variations_form') !== null;
+        return isVariable;
+    }
+
+    function hasVariationSelected() {
+        const variationId = getCurrentVariationId();
+        const hasSelected = variationId > 0;
+        return hasSelected;
+    }
+
+    function setFormDisabled(disabled = true) {
+        const button = document.querySelector('.woo-better-button-current-style');
+        const input = document.querySelector('.woo-better-input-current-style');
+        
+        if (!button || !input) {
+            return;
+        }
+
+        button.disabled = disabled;
+        input.disabled = disabled;
+        
+        if (disabled) {
+            // Aplica estilos de desabilitado
+            input.style.backgroundColor = '#f5f5f5';
+            input.style.color = '#999';
+            input.style.cursor = 'not-allowed';
+            input.placeholder = 'Selecione uma variação primeiro';
+            
+            button.style.backgroundColor = '#ccc';
+            button.style.color = '#666';
+            button.style.cursor = 'not-allowed';
+        } else {
+            // Restaura estilos normais
+            input.style.backgroundColor = WooBetterData.inputStyles.backgroundColor || '#fff';
+            input.style.color = WooBetterData.inputStyles.color || '#333';
+            input.style.cursor = '';
+            input.placeholder = WooBetterData.placeholder || 'Digite o CEP';
+            
+            button.style.backgroundColor = WooBetterData.buttonStyles.backgroundColor || '#0073aa';
+            button.style.color = WooBetterData.buttonStyles.color || '#fff';
+            button.style.cursor = '';
+        }
+    }
+
+    function setupVariationChangeListener() {
+        const variationForm = document.querySelector('.variations_form');
+        if (variationForm) {
+            // Escuta mudanças na seleção de variação
+            variationForm.addEventListener('found_variation', function(event) {
+                // Habilita o formulário agora que uma variação foi selecionada
+                setFormDisabled(false);
+                
+                // Limpa o cache quando uma nova variação é selecionada
+                invalidateCache();
+                
+                // Se já existe um resultado de frete exibido, remove para forçar nova consulta
+                const infoBlock = document.querySelector('.woo-better-info-block');
+                if (infoBlock) {
+                    infoBlock.style.display = 'none';
+                }
+                
+                // Reexibe o formulário de CEP se estava oculto
+                const form = document.querySelector('#custom-postcode-form');
+                if (form && form.style.display === 'none') {
+                    form.style.display = 'block';
+                }
+                
+                // Se tem consulta automática habilitada e já tem CEP salvo, faz nova consulta
+                const lastPostcode = getLastUsedPostcode();
+                if (WooBetterData.enable_search === 'yes' && lastPostcode && hasUserMadeQuery) {
+                    setTimeout(() => {
+                        sendCEP(lastPostcode, true);
+                    }, 300);
+                }
+            });
+            
+            // Também escuta quando a variação é resetada
+            variationForm.addEventListener('reset_data', function(event) {
+                // Desabilita o formulário quando variação é resetada
+                setFormDisabled(true);
+                
+                invalidateCache();
+                
+                const infoBlock = document.querySelector('.woo-better-info-block');
+                if (infoBlock) {
+                    infoBlock.style.display = 'none';
+                }
+                
+                const form = document.querySelector('#custom-postcode-form');
+                if (form && form.style.display === 'none') {
+                    form.style.display = 'block';
+                }
+            });
+            
+            // Adiciona um observer para mudanças diretas no input variation_id
+            const variationInput = variationForm.querySelector('input[name="variation_id"]');
+            if (variationInput) {
+                // Usando MutationObserver para detectar mudanças de atributo value
+                const observer = new MutationObserver(function(mutations) {
+                    mutations.forEach(function(mutation) {
+                        if (mutation.type === 'attributes' && mutation.attributeName === 'value') {
+                            checkAndUpdateFormState();
+                        }
+                    });
+                });
+                
+                observer.observe(variationInput, {
+                    attributes: true,
+                    attributeFilter: ['value']
+                });
+                
+                // Também escuta evento de input
+                variationInput.addEventListener('input', function() {
+                    checkAndUpdateFormState();
+                });
+                
+                // E evento change
+                variationInput.addEventListener('change', function() {
+                    checkAndUpdateFormState();
+                });
+                
+                // Verifica periodicamente se o valor mudou (fallback)
+                setInterval(function() {
+                    const currentValue = variationInput.value;
+                    if (currentValue !== variationInput.dataset.lastValue) {
+                        variationInput.dataset.lastValue = currentValue;
+                        checkAndUpdateFormState();
+                    }
+                }, 1000);
+                
+                // Inicializa o valor de referência
+                variationInput.dataset.lastValue = variationInput.value;
+            }
+        }
+    }
+    
+    function checkAndUpdateFormState() {
+        if (isVariableProduct()) {
+            const currentVariationId = getCurrentVariationId();
+            
+            // Verifica se a variação mudou (incluindo mudanças entre variações válidas)
+            const lastVariationId = window.lastVariationId || null;
+            const hasVariationChanged = lastVariationId !== null && lastVariationId !== currentVariationId;
+            
+            // Atualiza a variação atual para próxima comparação
+            window.lastVariationId = currentVariationId;
+            
+            if (hasVariationSelected()) {
+                setFormDisabled(false);
+                
+                // Se a variação mudou de uma para outra, limpa os resultados antigos
+                if (hasVariationChanged && currentVariationId > 0) {
+                    
+                    // Esconde o bloco de resultados
+                    const infoBlock = document.querySelector('.woo-better-info-block');
+                    if (infoBlock) {
+                        infoBlock.style.display = 'none';
+                    }
+                    
+                    // Mostra o formulário de CEP novamente
+                    const form = document.querySelector('#custom-postcode-form');
+                    if (form) {
+                        form.style.display = 'block';
+                    }
+                    
+                    // Limpa o cache para forçar nova consulta
+                    invalidateCache();
+                }
+                
+                // Verifica se deve fazer consulta automática quando variação é selecionada
+                if (WooBetterData.enable_search === 'yes' && lastVariationId !== currentVariationId) {
+                    const inputPostcode = document.querySelector('.woo-better-input-current-style');
+                    if (inputPostcode && inputPostcode.value && inputPostcode.value.trim().length >= 9) {
+                        const postcode = inputPostcode.value.trim();
+                        
+                        // Primeiro verifica se há cache para esta variação específica
+                        const cachedData = getCachedShippingData(postcode, WooBetterData.product_id);
+                        if (cachedData) {
+                            const infoBlock = document.querySelector('.woo-better-info-block');
+                            const form = document.querySelector('#custom-postcode-form');
+                            processShippingRatesFromCache(cachedData, form, infoBlock, postcode);
+                        } else {
+                            // Pequeno delay para garantir que a UI está atualizada e chama sendCEP diretamente
+                            setTimeout(() => {
+                                sendCEP(postcode, true);
+                            }, 300);
+                        }
+                    }
+                }
+            } else {
+                setFormDisabled(true);
+                
+                // Esconde o bloco de resultados quando não há variação selecionada
+                const infoBlock = document.querySelector('.woo-better-info-block');
+                if (infoBlock) {
+                    infoBlock.style.display = 'none';
+                }
+                
+                // Mostra o formulário de CEP novamente
+                const form = document.querySelector('#custom-postcode-form');
+                if (form && form.style.display === 'none') {
+                    form.style.display = 'block';
+                }
+            }
+        } else {
+            setFormDisabled(false);
+        }
     }
 
     function fetchProductNonce(callback) {
@@ -80,6 +328,9 @@ document.addEventListener('DOMContentLoaded', function () {
         const postcodeText = document.createElement('span');
         postcodeText.innerHTML = `<strong>CEP</strong>: ${postcode}`;
         postcodeText.classList.add('woo-better-current-postcode-text');
+        if (font_class) {
+            postcodeText.classList.add(font_class);
+        }
 
         toggleButton.addEventListener('click', () => {
             const contentBlock = document.querySelector('.woo-better-content-block');
@@ -118,6 +369,9 @@ document.addEventListener('DOMContentLoaded', function () {
         changeButton.type = 'button';
         changeButton.textContent = 'Alterar';
         changeButton.classList.add('woo-better-change-postcode-button');
+        if (font_class) {
+            changeButton.classList.add(font_class);
+        }
 
         changeButton.addEventListener('click', () => {
             const infoBlock = document.querySelector('.woo-better-info-block');
@@ -183,7 +437,6 @@ document.addEventListener('DOMContentLoaded', function () {
                 border-radius: ${WooBetterData.inputStyles.borderRadius} !important;
                 padding: 0px !important;
                 margin: 20px 0px !important;
-                font-family: 'Poppins', sans-serif !important;
                 font-size: 14px !important;
             }
 
@@ -349,44 +602,24 @@ document.addEventListener('DOMContentLoaded', function () {
     function createInfoBlock(productInfo, shippingRates, postcode, form) {
         const infoBlock = document.createElement('div');
         infoBlock.classList.add('woo-better-info-block');
+        infoBlock.classList.add(font_class);
 
         const lastPostcode = getLastUsedPostcode();
 
         // Verifica se os dados passados são dados reais (não placeholder)
         const hasRealData = productInfo && productInfo.name && productInfo.name !== '*******';
 
-        if (!lastPostcode || WooBetterData.enable_search !== 'yes') {
-            // Não exibe cache se:
-            // 1. Não há CEP salvo, OU
-            // 2. Consulta automática está desabilitada
-            infoBlock.style.display = 'none';
-        } else if (hasRealData) {
-            // Se tem dados reais (do cache), sempre exibe
-            infoBlock.style.display = 'block';
-        } else {
-            // Verifica se existe cache para este CEP e produto específico
-            const cachedData = getCachedShippingData(lastPostcode, WooBetterData.product_id);
-
-            if (cachedData) {
-                // Se há cache para este produto específico, exibe o bloco
-                infoBlock.style.display = 'block';
-            } else {
-                // Se não há cache, mantém escondido inicialmente
-                infoBlock.style.display = 'none';
-            }
-        }
+        // Sempre inicializa o componente escondido
+        // O componente só será exibido após uma consulta (automática ou manual)
+        infoBlock.style.display = 'none';
 
         // Conteúdo do bloco
         const contentBlock = document.createElement('div');
         contentBlock.classList.add('woo-better-content-block');
 
-        // Se tem dados reais (do cache), já expande o conteúdo inicialmente
-        if (hasRealData) {
-            contentBlock.style.display = 'block';
-            contentBlock.classList.add('expanded');
-        } else {
-            contentBlock.style.display = 'none'; // Esconde o conteúdo inicialmente se não tem dados reais
-        }
+        // Sempre inicializa o contentBlock escondido
+        // O conteúdo só será exibido após uma consulta
+        contentBlock.style.display = 'none';
 
         // Nome do Produto
         const productName = document.createElement('p');
@@ -404,6 +637,9 @@ document.addEventListener('DOMContentLoaded', function () {
         productName.appendChild(productText);
 
         productName.classList.add('woo-better-product-name');
+        if (font_class) {
+            productName.classList.add(font_class);
+        }
 
         const productQuantity = document.createElement('p');
 
@@ -419,6 +655,9 @@ document.addEventListener('DOMContentLoaded', function () {
         productQuantity.appendChild(quantityText);
 
         productQuantity.classList.add('woo-better-product-quantity');
+        if (font_class) {
+            productQuantity.classList.add(font_class);
+        }
 
         // Métodos de Entrega Disponíveis
         const shippingMethods = document.createElement('div');
@@ -442,17 +681,32 @@ document.addEventListener('DOMContentLoaded', function () {
         const shippingList = document.createElement('ul');
         shippingList.classList.add('woo-better-shipping-list');
 
-        shippingRates.forEach(rate => {
-            const listItem = document.createElement('li');
+        // Verifica se é produto digital antes de popular a lista
+        if (productInfo.digital === true || (Array.isArray(shippingRates) && shippingRates.length === 0 && productInfo.digital)) {
+            // Para produtos digitais, mostra mensagem específica
+            const digitalItem = document.createElement('li');
+            if (font_class) {
+                digitalItem.classList.add(font_class);
+            }
+            digitalItem.textContent = 'Produto digital, não há taxas de envio.';
+            shippingList.appendChild(digitalItem);
+        } else {
+            // Para produtos físicos, mostra lista normal de taxas
+            shippingRates.forEach(rate => {
+                const listItem = document.createElement('li');
+                if (font_class) {
+                    listItem.classList.add(font_class);
+                }
 
-            // Decodifica HTML entities do currency symbol
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = productInfo.currency_symbol;
-            const decodedSymbol = tempDiv.textContent || tempDiv.innerText || productInfo.currency_symbol;
+                // Decodifica HTML entities do currency symbol
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = productInfo.currency_symbol;
+                const decodedSymbol = tempDiv.textContent || tempDiv.innerText || productInfo.currency_symbol;
 
-            listItem.innerHTML = `<strong>${decodedSymbol} ${parseFloat(rate.cost).toFixed(productInfo.currency_minor_unit).replace('.', ',')}</strong> - ${rate.label}`;
-            shippingList.appendChild(listItem);
-        });
+                listItem.innerHTML = `<strong>${decodedSymbol} ${parseFloat(rate.cost).toFixed(productInfo.currency_minor_unit).replace('.', ',')}</strong> - ${rate.label}`;
+                shippingList.appendChild(listItem);
+            });
+        }
 
         shippingMethods.appendChild(shippingList);
 
@@ -567,6 +821,9 @@ document.addEventListener('DOMContentLoaded', function () {
         input.name = 'woo_better_custom_product_postcode';
         input.placeholder = WooBetterData.placeholder || 'Digite o CEP';
         input.classList.add('woo-better-input-current-style');
+        if (font_class) {
+            input.classList.add(font_class);
+        }
         input.autocomplete = 'postal-code';
 
         if (lastPostcode) {
@@ -626,6 +883,9 @@ document.addEventListener('DOMContentLoaded', function () {
         button.type = 'submit';
         button.textContent = 'CONSULTAR';
         button.classList.add('woo-better-button-current-style');
+        if (font_class) {
+            button.classList.add(font_class);
+        }
 
         // Aplica os estilos do botão
         const buttonStyles = WooBetterData.buttonStyles || {};
@@ -642,6 +902,9 @@ document.addEventListener('DOMContentLoaded', function () {
         linkText.href = 'https://buscacepinter.correios.com.br/app/endereco/index.php';
         linkText.textContent = 'Não sei meu CEP';
         linkText.classList.add('woo-better-link-current-style');
+        if (font_class) {
+            linkText.classList.add(font_class);
+        }
         linkText.target = '_blank';
 
         // Adiciona o texto ao container
@@ -649,10 +912,23 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Adiciona os elementos ao formulário
         form.appendChild(containerDiv);
+        
+        // Se é produto variável, verifica se deve desabilitar inicialmente
+        if (isVariableProduct() && !hasVariationSelected()) {
+            // Usa setTimeout para garantir que o formulário esteja completamente renderizado
+            setTimeout(() => {
+                setFormDisabled(true);
+            }, 100);
+        }
 
         // Adiciona o evento de envio ao formulário
         form.addEventListener('submit', function (e) {
             e.preventDefault(); // Impede o envio padrão do formulário
+
+            // Se é produto variável e não tem variação selecionada, não permite envio
+            if (isVariableProduct() && !hasVariationSelected()) {
+                return; // Simplesmente não faz nada, sem alert
+            }
 
             const postcode = input.value.trim();
 
@@ -767,9 +1043,15 @@ document.addEventListener('DOMContentLoaded', function () {
                         if (cachedData) {
                             initializeData = {
                                 product: cachedData.product,
-                                shipping_rates: cachedData.shipping_rates,
+                                shipping_rates: cachedData.shipping_rates || [],
                                 postcode: lastPostcode,
                             };
+                            
+                            // Se é produto digital, adiciona a flag para o createInfoBlock
+                            if (cachedData.digital === true) {
+                                initializeData.product.digital = true;
+                                initializeData.shipping_rates = []; // Garante array vazio para produtos digitais
+                            }
                         } else {
                             initializeData.postcode = lastPostcode;
                         }
@@ -791,62 +1073,42 @@ document.addEventListener('DOMContentLoaded', function () {
                             const inputPostcode = document.querySelector('.woo-better-input-current-style');
                             if (inputPostcode) {
                                 inputPostcode.value = lastPostcode;
+                                
+                                // Para produtos variáveis, sempre exibe o formulário inicialmente
+                                if (isVariableProduct()) {
+                                    form.style.display = 'block';
+                                    
+                                    // Se não tem variação selecionada, desabilita o formulário
+                                    if (!hasVariationSelected()) {
+                                        setFormDisabled(true);
+                                    } else {
+                                        setFormDisabled(false);
+                                        
+                                        // Se tem variação selecionada E há cache, pode fazer consulta automática
+                                        if (WooBetterData.enable_search === 'yes') {
+                                            const cachedData = getCachedShippingData(lastPostcode, WooBetterData.product_id);
+                                            if (cachedData) {
+                                                const infoBlock = document.querySelector('.woo-better-info-block');
+                                                processShippingRatesFromCache(cachedData, form, infoBlock, lastPostcode);
+                                            } else {
+                                                setTimeout(() => {
+                                                    sendCEP(lastPostcode, true);
+                                                }, 100);
+                                            }
+                                        }
+                                    }
+                                    return; // Para aqui para produtos variáveis
+                                }
 
-                                // Verifica se existe cache para exibir o componente
+                                // Lógica original para produtos simples/digitais
                                 if (WooBetterData.enable_search && WooBetterData.enable_search === 'yes') {
                                     // Verifica se existe cache para este CEP e produto específico
                                     const cachedData = getCachedShippingData(lastPostcode, WooBetterData.product_id);
 
                                     if (cachedData) {
+                                        // Se há cache, usa os dados do cache diretamente sem nova consulta
                                         const infoBlock = document.querySelector('.woo-better-info-block');
-                                        if (infoBlock) {
-                                            // Se os dados já foram carregados na inicialização (dados reais),
-                                            // só precisa garantir que o componente esteja expandido e visível
-                                            const hasRealDataInComponent = cachedData.product && cachedData.product.name && cachedData.product.name !== '*******';
-
-                                            if (hasRealDataInComponent) {
-                                                // Componente já foi criado com dados reais, só ajusta a visualização
-                                                infoBlock.style.display = 'block';
-
-                                                const toggleButton = infoBlock.querySelector('.woo-better-toggle-button');
-                                                if (toggleButton) {
-                                                    toggleButton.innerHTML = '';
-                                                    displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
-                                                }
-
-                                                const contentInfoBlock = infoBlock.querySelector('.woo-better-content-block');
-                                                if (contentInfoBlock) {
-                                                    contentInfoBlock.classList.add('expanded');
-                                                    contentInfoBlock.style.display = 'block';
-                                                    contentInfoBlock.style.height = `${contentInfoBlock.scrollHeight}px`;
-                                                }
-                                            } else {
-                                                // Dados não foram carregados na inicialização, processa agora
-                                                processShippingRatesFromCache(cachedData, form, infoBlock, lastPostcode);
-
-                                                // Exibe o componente
-                                                infoBlock.style.display = 'block';
-
-                                                const toggleButton = infoBlock.querySelector('.woo-better-toggle-button');
-                                                if (toggleButton) {
-                                                    toggleButton.innerHTML = '';
-                                                    displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
-                                                }
-
-                                                const contentInfoBlock = infoBlock.querySelector('.woo-better-content-block');
-                                                if (contentInfoBlock) {
-                                                    contentInfoBlock.classList.add('expanded');
-                                                    contentInfoBlock.style.display = 'block';
-                                                    contentInfoBlock.style.height = `${contentInfoBlock.scrollHeight}px`;
-                                                }
-                                            }
-
-                                            // Atualiza o CEP no componente
-                                            const currentPostcodeText = infoBlock.querySelector('.woo-better-current-postcode-text');
-                                            if (currentPostcodeText) {
-                                                currentPostcodeText.innerHTML = `<strong>CEP</strong>: ${lastPostcode}`;
-                                            }
-                                        }
+                                        processShippingRatesFromCache(cachedData, form, infoBlock, lastPostcode);
                                     } else {
                                         // Não há cache para este produto específico com o CEP atual
                                         // Inconsistência detectada: exibe o formulário imediatamente
@@ -906,31 +1168,8 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         }
 
-        // Se não existe cache para este produto específico, verifica se há cache para outros produtos com o mesmo CEP
-        const cache = getProductCache();
-        const hasOtherProductCache = cache[postcode] && Object.keys(cache[postcode]).length > 0;
-
-        if (hasOtherProductCache) {
-            // Se há cache para outros produtos, mantém o componente visível com dados temporários
-            const infoBlock = document.querySelector('.woo-better-info-block');
-            if (infoBlock) {
-                // Mantém o bloco visível mas indica que está carregando dados específicos do produto
-                const productName = infoBlock.querySelector('.woo-better-product-name');
-                if (productName) {
-                    const productTextNode = productName.childNodes[1];
-                    if (productTextNode && productTextNode.nodeType === Node.TEXT_NODE) {
-                        productTextNode.textContent = ' Carregando dados do produto...';
-                    }
-                }
-
-                const shippingList = infoBlock.querySelector('.woo-better-shipping-list');
-                if (shippingList) {
-                    shippingList.innerHTML = '<li>Calculando taxas de envio...</li>';
-                }
-
-                infoBlock.style.display = 'block';
-            }
-        }
+        // Continua com a consulta normal via API
+        // O componente só será exibido após a consulta terminar com sucesso
 
         // Continua com a consulta normal via API
         const controller = new AbortController();
@@ -966,9 +1205,22 @@ document.addEventListener('DOMContentLoaded', function () {
 
                     const addressAPIUrl = WooBetterData.ajaxurl;
 
+                    // Detecta variation_id se o produto for variável
+                    let variationId = 0;
+                    const variationForm = document.querySelector('.variations_form');
+                    if (variationForm) {
+                        const variationInput = variationForm.querySelector('input[name="variation_id"]');
+                        if (variationInput && variationInput.value) {
+                            variationId = variationInput.value;
+                        }
+                    }
+
                     const formData = new FormData();
                     formData.append('action', 'register_product_address');
                     formData.append('product_id', WooBetterData.product_id);
+                    if (variationId > 0) {
+                        formData.append('variation_id', variationId);
+                    }
                     formData.append('shipping[address_1]', addressData);
                     formData.append('shipping[city]', cityData);
                     formData.append('shipping[state]', stateData);
@@ -990,40 +1242,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
                                 processShippingRates(response.data, form, infoBlock, postcode)
                                     .then(() => {
-                                        const button = document.querySelector('.woo-better-button-current-style');
-                                        const input = document.querySelector('.woo-better-input-current-style');
-                                        // Reabilita o botão e o input após a conclusão da requisição
-                                        button.disabled = false;
-                                        input.disabled = false;
-
-                                        // Restaura o texto original do botão
-                                        button.textContent = originalButtonText;
-
-                                        const cepBlock = document.querySelector('.woo-better-current-postcode-block');
-                                        if (cepBlock) {
-                                            // Atualiza o texto do bloco de CEP atual
-                                            cepBlock.style.display = 'flex';
-                                        }
-
-                                        infoBlock.style.display = 'block';
-
-                                        // Remove os estilos de desabilitado
-                                        input.style.backgroundColor = WooBetterData.inputStyles.backgroundColor || '#fff';
-                                        input.style.cursor = '';
-                                        button.style.backgroundColor = WooBetterData.buttonStyles.backgroundColor || '#0073aa';
-                                        button.style.cursor = '';
-
-                                        const toggleButton = infoBlock.querySelector('.woo-better-toggle-button');
-                                        if (toggleButton) {
-                                            toggleButton.innerHTML = '';
-                                            displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
-                                        }
-
-                                        const contentInfoBlock = infoBlock.querySelector('.woo-better-content-block');
-                                        if (contentInfoBlock) {
-                                            contentInfoBlock.classList.add('expanded');
-                                            contentInfoBlock.style.display = 'block';
-                                        }
+                                        enablePostcodeForm();
                                     })
                                     .catch(error => {
                                         enablePostcodeForm();
@@ -1034,53 +1253,23 @@ document.addEventListener('DOMContentLoaded', function () {
                                         }
                                     })
                             } else {
-                                if (response.data.digital) {
-                                    const infoBlock = document.querySelector('.woo-better-info-block');
-                                    const form = document.querySelector('#custom-postcode-form');
+                                // Remove o tratamento duplicado de produtos digitais, deixa o processShippingRates() lidar com tudo
+                                const infoBlock = document.querySelector('.woo-better-info-block');
+                                const form = document.querySelector('#custom-postcode-form');
 
-                                    if (form) {
-                                        form.style.display = 'none'; // Esconde o bloco de informações
-                                    }
-
-                                    const productName = infoBlock.querySelector('.woo-better-product-name');
-                                    if (productName) {
-                                        const productTextNode = productName.childNodes[1]; // O nó de texto está na posição 1
-                                        if (productTextNode && productTextNode.nodeType === Node.TEXT_NODE) {
-                                            productTextNode.textContent = ` Produto: ${response.data.product_name}`;
+                                processShippingRates(response.data, form, infoBlock, postcode)
+                                    .then(() => {
+                                        enablePostcodeForm();
+                                    })
+                                    .catch(error => {
+                                        enablePostcodeForm();
+                                        
+                                        // Só mostra alert para erros relacionados ao CEP
+                                        const message = response.data.message || 'Erro ao processar as taxas de envio.';
+                                        if (message.toLowerCase().includes('cep')) {
+                                            alert(message);
                                         }
-                                    }
-
-                                    if (infoBlock) {
-                                        const postcodeText = infoBlock.querySelector('.woo-better-current-postcode-text');
-                                        const shippingList = infoBlock.querySelector('.woo-better-shipping-list');
-
-                                        if (postcodeText) {
-                                            postcodeText.innerHTML = `<strong>CEP</strong>: ${postcodeValue}`;
-                                        }
-
-                                        if (shippingList) {
-                                            shippingList.innerHTML = '<li>Produto digital, não há taxas de envio.</li>';
-                                        }
-
-                                        infoBlock.style.display = 'block'; // Exibe o bloco de informações
-                                        const contentBlock = infoBlock.querySelector('.woo-better-content-block');
-                                        if (contentBlock) {
-                                            contentBlock.classList.add('expanded');
-                                            contentBlock.style.display = 'block';
-                                        }
-                                    }
-
-
-                                    enablePostcodeForm();
-                                } else {
-                                    // Só mostra alert para erros relacionados ao CEP
-                                    const message = response.data.message || 'Erro ao processar as taxas de envio.';
-
-                                    if (message.toLowerCase().includes('cep')) {
-                                        alert(message);
-                                    }
-                                    enablePostcodeForm();
-                                }
+                                    })
                             }
                         })
                         .catch(error => {
@@ -1119,6 +1308,84 @@ document.addEventListener('DOMContentLoaded', function () {
         return new Promise((resolve, reject) => {
             try {
                 const shippingRates = response;
+
+                // Verifica se é produto digital primeiro
+                if (shippingRates.digital === true) {
+                    // Cria estrutura de dados para produto digital similar ao formato padrão
+                    const digitalProductData = {
+                        product: {
+                            name: shippingRates.product_name,
+                            quantity: WooBetterData.quantity || 1,
+                            currency_symbol: 'R$',
+                            currency_minor_unit: 2,
+                            updated_at: new Date().toISOString()
+                        },
+                        shipping_rates: [], // Array vazio para produtos digitais
+                        digital: true,
+                        message: shippingRates.message || 'Produto digital, não há taxas de envio.'
+                    };
+
+                    // Salva no cache para evitar consultas futuras
+                    setCachedShippingData(postcode, WooBetterData.product_id, digitalProductData);
+                    
+                    // Atualiza o último CEP usado
+                    setLastUsedPostcode(postcode);
+
+                    // Tratamento para produtos digitais
+                    const contentBlock = infoBlock.querySelector('.woo-better-content-block');
+                    
+                    const productName = infoBlock.querySelector('.woo-better-product-name');
+                    if (productName) {
+                        const productTextNode = productName.childNodes[1];
+                        if (productTextNode && productTextNode.nodeType === Node.TEXT_NODE) {
+                            productTextNode.textContent = ` Produto: ${shippingRates.product_name}`;
+                        }
+                    }
+
+                    const shippingList = contentBlock.querySelector('.woo-better-shipping-list');
+                    if (shippingList) {
+                        shippingList.innerHTML = '<li>Produto digital, não há taxas de envio.</li>';
+                    }
+
+                    // Atualiza o CEP no bloco de CEP atual
+                    const currentPostcodeText = infoBlock.querySelector('.woo-better-current-postcode-text');
+                    if (currentPostcodeText) {
+                        currentPostcodeText.innerHTML = `<strong>CEP</strong>: ${postcode}`;
+                    }
+
+                    // Atualiza a data de atualização para produtos digitais
+                    const updateDate = infoBlock.querySelector('.woo-better-update-date');
+                    if (updateDate) {
+                        const updateTime = new Date().toLocaleString('pt-BR');
+                        updateDate.textContent = `Atualizado em ${updateTime}`;
+                        
+                        // Adiciona a animação de flash para indicar atualização
+                        updateDate.classList.remove('flash');
+                        updateDate.offsetWidth; // Força reflow
+                        updateDate.classList.add('flash');
+                        
+                        setTimeout(() => {
+                            updateDate.classList.remove('flash');
+                        }, 2000);
+                    }
+
+                    // Esconde o formulário e exibe o bloco de informações
+                    form.style.display = 'none';
+                    infoBlock.style.display = 'block';
+                    
+                    const toggleButton = infoBlock.querySelector('.woo-better-toggle-button');
+                    if (toggleButton) {
+                        toggleButton.innerHTML = '';
+                        displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
+                    }
+
+                    if (contentBlock) {
+                        contentBlock.classList.add('expanded');
+                        contentBlock.style.display = 'block';
+                    }
+
+                    return resolve();
+                }
 
                 if (!shippingRates || !Array.isArray(shippingRates.shipping_rates) || shippingRates.shipping_rates.length === 0) {
                     // Esconde todos os componentes filhos do bloco
@@ -1181,6 +1448,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 // Esconde o formulário de CEP
                 form.style.display = 'none';
+                
+                // Exibe o bloco de informações
+                infoBlock.style.display = 'block';
 
                 // Atualiza o componente com os dados recebidos
                 const contentBlock = infoBlock.querySelector('.woo-better-content-block');
@@ -1274,6 +1544,18 @@ document.addEventListener('DOMContentLoaded', function () {
                     }, 800);
                 }
 
+                // Garante que o bloco de conteúdo seja expandido
+                if (contentBlock) {
+                    const toggleButton = infoBlock.querySelector('.woo-better-toggle-button');
+                    if (toggleButton) {
+                        toggleButton.innerHTML = '';
+                        displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
+                    }
+                    
+                    contentBlock.classList.add('expanded');
+                    contentBlock.style.display = 'block';
+                }
+
                 // Resolve a Promise após a conclusão
                 resolve();
             } catch (error) {
@@ -1319,20 +1601,26 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             }
 
-            // Limpa e popula a lista de métodos de envio
-            shippingList.innerHTML = '';
-            shippingRates.shipping_rates.forEach(rate => {
-                const listItem = document.createElement('li');
-                const cost = parseFloat(rate.cost).toFixed(shippingRates.product.currency_minor_unit).replace('.', ',');
+            // Verifica se é produto digital do cache
+            if (shippingRates.digital === true) {
+                // Tratamento específico para produtos digitais do cache
+                shippingList.innerHTML = '<li>Produto digital, não há taxas de envio.</li>';
+            } else {
+                // Limpa e popula a lista de métodos de envio para produtos físicos
+                shippingList.innerHTML = '';
+                shippingRates.shipping_rates.forEach(rate => {
+                    const listItem = document.createElement('li');
+                    const cost = parseFloat(rate.cost).toFixed(shippingRates.product.currency_minor_unit).replace('.', ',');
 
-                // Decodifica HTML entities do currency symbol
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = shippingRates.product.currency_symbol;
-                const decodedSymbol = tempDiv.textContent || tempDiv.innerText || shippingRates.product.currency_symbol;
+                    // Decodifica HTML entities do currency symbol
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = shippingRates.product.currency_symbol;
+                    const decodedSymbol = tempDiv.textContent || tempDiv.innerText || shippingRates.product.currency_symbol;
 
-                listItem.innerHTML = `<strong>${decodedSymbol} ${cost}</strong> - ${rate.label}`;
-                shippingList.appendChild(listItem);
-            });
+                    listItem.innerHTML = `<strong>${decodedSymbol} ${cost}</strong> - ${rate.label}`;
+                    shippingList.appendChild(listItem);
+                });
+            }
 
             // Atualiza o CEP no bloco de CEP atual
             const currentPostcodeText = infoBlock.querySelector('.woo-better-current-postcode-text');
@@ -1406,8 +1694,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
             // Em caso de erro, remove o cache corrompido e força nova consulta
             const cache = getProductCache();
-            if (cache[postcode] && cache[postcode][WooBetterData.product_id]) {
-                delete cache[postcode][WooBetterData.product_id];
+            const variationId = getCurrentVariationId();
+            const cacheKey = variationId > 0 ? `${WooBetterData.product_id}_${variationId}` : WooBetterData.product_id;
+            
+            if (cache[postcode] && cache[postcode][cacheKey]) {
+                delete cache[postcode][cacheKey];
                 localStorage.setItem('woo_better_product_cache', JSON.stringify(cache));
             }
         }
@@ -1468,9 +1759,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function getCachedShippingData(postcode, productId) {
         const cache = getProductCache();
+        const variationId = getCurrentVariationId();
+        const cacheKey = variationId > 0 ? `${productId}_${variationId}` : productId;
 
-        if (cache[postcode] && cache[postcode][productId]) {
-            return cache[postcode][productId];
+        if (cache[postcode] && cache[postcode][cacheKey]) {
+            return cache[postcode][cacheKey];
         }
 
         return null;
@@ -1479,6 +1772,8 @@ document.addEventListener('DOMContentLoaded', function () {
     function setCachedShippingData(postcode, productId, shippingData) {
         const cacheKey = 'woo_better_product_cache';
         const cache = getProductCache();
+        const variationId = getCurrentVariationId();
+        const productCacheKey = variationId > 0 ? `${productId}_${variationId}` : productId;
 
         // Inicializa a estrutura se necessário
         if (!cache[postcode]) {
@@ -1491,6 +1786,16 @@ document.addEventListener('DOMContentLoaded', function () {
             shipping_rates: shippingData.shipping_rates,
             timestamp: Date.now()
         };
+        
+        // Preserva a flag digital se existir
+        if (shippingData.digital !== undefined) {
+            cleanData.digital = shippingData.digital;
+        }
+
+        cache[postcode][productCacheKey] = cleanData;
+        if (shippingData.digital === true) {
+            cleanData.digital = true;
+        }
 
         // Salva os dados limpos
         cache[postcode][productId] = cleanData;

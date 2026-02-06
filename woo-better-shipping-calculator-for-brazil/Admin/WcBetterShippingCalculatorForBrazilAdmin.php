@@ -2,9 +2,6 @@
 
 namespace Lkn\WcBetterShippingCalculatorForBrazil\Admin;
 
-use Lkn\WcBetterShippingCalculatorForBrazil\Includes\WcBetterShippingCalculatorForBrazilHelpers as h;
-use Lkn\WcBetterShippingCalculatorForBrazil\Includes\WcBetterShippingCalculatorForBrazilStates;
-
 /**
  * The admin-specific functionality of the plugin.
  *
@@ -44,6 +41,43 @@ class WcBetterShippingCalculatorForBrazilAdmin
      * @var      string    $version    The current version of this plugin.
      */
     private $version;
+
+    /**
+     * Obtém URL do admin-ajax.php correta para multisite
+     * 
+     * @return string URL do admin-ajax.php
+     * @since 4.7.0
+     */
+    private function get_admin_ajax_url()
+    {
+        if (is_multisite()) {
+            // Em multisite, sempre usar URL específica do site atual
+            return get_admin_url(get_current_blog_id(), 'admin-ajax.php');
+        }
+        
+        return admin_url('admin-ajax.php');
+    }
+
+    /**
+     * Verifica se o usuário tem permissão para gerenciar opções em multisite
+     * 
+     * @return bool
+     * @since 4.7.0
+     */
+    private function user_can_manage_multisite_options()
+    {
+        if (is_multisite()) {
+            // Super admins podem gerenciar em qualquer site
+            if (is_super_admin()) {
+                return true;
+            }
+            
+            // Site admins só podem gerenciar no próprio site
+            return current_user_can('manage_options');
+        }
+        
+        return current_user_can('manage_options');
+    }
 
     /**
      * Initialize the class and set its properties.
@@ -102,8 +136,8 @@ class WcBetterShippingCalculatorForBrazilAdmin
          * between the defined hooks and the functions defined in this
          * class.
          */
-
-        $notice_dismissed = get_user_meta(get_current_user_id(), 'woo_better_calc_notice_dismissed', true);
+        $notice_key = 'woo_better_calc_notice_dismissed_' . WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION;
+        $notice_dismissed = get_user_meta(get_current_user_id(), $notice_key, true);
 
         if (!$notice_dismissed) {
             wp_enqueue_script(
@@ -116,56 +150,8 @@ class WcBetterShippingCalculatorForBrazilAdmin
 
             wp_localize_script('woo-better-calc-admin-notice', 'wooBetterNotice', array(
                 'nonce' => wp_create_nonce('woo_better_calc_dismiss_notice'),
-                'ajaxurl' => admin_url('admin-ajax.php')
+                'ajaxurl' => $this->get_admin_ajax_url()
             ));
         }
-    }
-
-    public function add_extra_css()
-    {
-        // translate to "Calcule o frete:"
-        $postcode_label = apply_filters(
-            h::prefix('postcode_label'),
-            __('Calculate shipping:', 'woo-better-shipping-calculator-for-brazil')
-        );
-        ?>
-<style>
-    <?php if ($postcode_label) : ?>
-    #calc_shipping_postcode_field::before {
-        display: block;
-        content: "<?php echo esc_html($postcode_label); ?>";
-    }
-
-    <?php endif; ?>
-
-    .shipping-calculator-button {
-        display: none !important;
-        visibility: hidden !important;
-    }
-
-    .shipping-calculator-form {
-        display: block !important;
-        height: auto !important;
-    }
-</style>
-<?php
-    }
-
-    public function prepare_address($address)
-    {
-        $country = h::get($address['country'], 'BR');
-        if (! $country || 'BR' === $country) {
-            $postcode = \wc_clean(\wp_unslash($address['postcode'] ?? ''));
-            $state = WcBetterShippingCalculatorForBrazilStates::get_state_from_postcode($postcode);
-            if ($state) {
-                $address['country'] = 'BR';
-                $_POST['calc_shipping_country'] = 'BR';
-                $address['state'] = $state;
-                $_POST['calc_shipping_state'] = $state;
-                $address['postcode'] = $postcode;
-                $_POST['calc_shipping_postcode'] = $postcode;
-            }
-        }
-        return $address;
     }
 }

@@ -7,6 +7,8 @@
     const subTitles = Array.from(mainForm.querySelectorAll('h2'));
     if (!tables.length || !subTitles.length) return;
 
+    let font_class = wcBetterCalcAjax.font_class
+
     const mainContainer = document.createElement('div');
     mainContainer.style.display = 'flex';
     mainContainer.style.flexWrap = 'wrap';
@@ -77,17 +79,7 @@
     }
 
     if (WCBetterCalcWooVersion.status === 'valid') {
-      const gutenbergElement = document.querySelector('input[name="woo_better_calc_cep_required"]');
-
-      if (gutenbergElement) {
-        const closestTbody = gutenbergElement.closest('tbody');
-        if (closestTbody) {
-          const gutenbergWarning = createWarningMessage('Configuração indisponível para o seu tema em blocos.');
-
-          // Insere o <tr> no início do <tbody>
-          closestTbody.insertBefore(gutenbergWarning, closestTbody.firstChild);
-        }
-      }
+      // Configuração indisponível para temas em blocos foi removida
     }
 
     // Mensagem de Warning na versão do WooCommerce
@@ -155,12 +147,12 @@
     }
 
     const featureMessage1 = createFeatureMessage('✔️', [
-      '<strong>NOVO:</strong> Adicione a busca de CEP nas páginas de carrinho e/ou produto.'
+      '<strong>ATUALIZADO:</strong> Todas as funcionalidades disponíveis no editor de blocos agora estão disponíveis no shortcode!'
     ]);
 
     // Cria o segundo bloco de mensagem
     const featureMessage2 = createFeatureMessage('✔️', [
-      '<strong>NOVO:</strong> Sistema de cache inteligente que armazena consultas de frete para acelerar consultas futuras e melhorar a experiência do usuário.'
+      '<strong>NOVO:</strong> Campos de CPF/CNPJ e Bairro para válidação dos dados do cliente.'
     ]);
 
     // Cria o cartão promocional do Plugin Link de Pagamento
@@ -433,11 +425,12 @@
           forminp.style.backgroundColor = '#fff';
           forminp.style.border = '1px solid #dfdfdf'
           forminp.style.borderRadius = '8px';
+          forminp.style.boxSizing = 'border-box';
 
           const titleDesc = row.querySelector('.wooBetterCustomTitle');
           if (titleDesc) {
             const pElement = document.createElement('p');
-            pElement.textContent = "Use shortcodes para adicionar funcionalidades específicas em temas clássicos."
+            pElement.textContent = "Utilize shortcodes para adicionar funcionalidades específicas do plugin a temas clássicos."
             pElement.style.fontWeight = 'normal';
             pElement.style.color = '#343B45';
 
@@ -466,7 +459,7 @@
 
               // Cria o <span> logo abaixo do <hr>
               const spanElement = document.createElement('span');
-              spanElement.textContent = "Shortcodes são úteis para temas que não utilizam o editor de blocos Gutenberg."
+              spanElement.textContent = "Shortcodes são especialmente úteis para temas clássicos que não utilizam o editor de blocos (Gutenberg)."
 
               spanElement.style.color = '#343B45'; // Cinza suave
               spanElement.style.fontSize = '13px';
@@ -665,6 +658,9 @@
               textInput.id = `woo_better_calc_${styleName}_input_current_style_postcode_fake_custom`;
               textInput.placeholder = placeholderInput ? placeholderInput.value : 'Insira seu CEP';
               textInput.classList.add('woo-better-input-current-style');
+              if (font_class) {
+                textInput.classList.add(font_class);
+              }
               textInput.style.cursor = 'pointer';
               textInput.readOnly = true; // Somente leitura
 
@@ -774,6 +770,9 @@
               button.textContent = 'CONSULTAR';
               button.id = `woo_better_calc_${styleName}_button_current_style_postcode_fake_custom`;
               button.classList.add('woo-better-button-current-style');
+              if (font_class) {
+                button.classList.add(font_class);
+              }
 
               // Aplica os valores de estilo dos campos ao botão
               Object.keys(buttonStyleComponents).forEach(componentId => {
@@ -812,6 +811,9 @@
               const linkText = document.createElement('p');
               linkText.textContent = 'Não sei meu CEP';
               linkText.classList.add('woo-better-link-current-style');
+              if (font_class) {
+                linkText.classList.add(font_class);
+              }
 
               // Adiciona o texto ao container
               containerDiv.appendChild(linkText);
@@ -871,7 +873,8 @@
             // Define relação entre mais de um componente em um bloco
             const targetComponentCartNames = {
               'woo_better_min_free_shipping_value': 'woo_better_enable_min_free_shipping',
-              'woo_better_hidden_cart_address': 'woo_better_calc_cep_required',
+              'woo_better_min_free_shipping_success_message': 'woo_better_min_free_shipping_message',
+              'woo_better_enable_progress_bar_value': 'woo_better_min_free_shipping_message',
 
               //Cart
               'woo_better_calc_cart_input_border_width': 'woo_better_calc_cart_input_background_color_field',
@@ -887,7 +890,6 @@
               'woo_better_calc_cart_input_icon': 'woo_better_calc_cart_input_placeholder',
               'woo_better_calc_cart_input_icon_color': 'woo_better_calc_cart_input_placeholder',
               'woo_better_calc_cart_custom_position': 'woo_better_calc_cart_input_position',
-              'woo_better_calc_cart_custom_remove': 'woo_better_calc_cart_custom_quantity',
 
               //Product
               'woo_better_calc_product_input_border_width': 'woo_better_calc_product_input_background_color_field',
@@ -904,6 +906,10 @@
               'woo_better_calc_product_input_icon_color': 'woo_better_calc_product_input_placeholder',
               'woo_better_calc_product_custom_position': 'woo_better_calc_product_input_position',
 
+              //Checkout
+              'woo_better_calc_enable_auto_address_fill': 'woo_better_calc_cep_field_position',
+              'woo_better_calc_contact_required': 'woo_better_calc_apply_phone_mask',
+              
               //Cache
               'woo_better_calc_cache_expiration_time': 'woo_better_calc_enable_auto_postcode_search',
               'woo_better_calc_enable_auto_cache_reset': 'woo_better_calc_enable_auto_postcode_search'
@@ -1266,6 +1272,202 @@
       }
     }
 
+    // Função para adicionar preview visual para o progress bar
+    function addProgressBarPreview() {
+      const progressBarRadios = document.querySelectorAll('input[name="woo_better_enable_progress_bar_value"]');
+      
+      if (progressBarRadios.length > 0) {
+        // Encontra o container principal
+        const firstRadio = progressBarRadios[0];
+        const formBody = firstRadio.closest('.woo-forminp-body');
+        
+        if (formBody && !formBody.querySelector('.woo-better-progress-preview')) {
+          // Obtém os caminhos das imagens via localize
+          const barImages = typeof WCBetterCalcBarImages !== 'undefined' ? WCBetterCalcBarImages : {};
+          
+          // Cria o container do preview
+          const previewContainer = document.createElement('div');
+          previewContainer.className = 'woo-better-progress-preview';
+          previewContainer.style.cssText = `
+            margin-top: 15px;
+          `;
+          
+          // Título do preview
+          const previewTitle = document.createElement('h4');
+          previewTitle.textContent = 'Preview da Barra de Progresso:';
+          previewTitle.style.cssText = `
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #333;
+          `;
+          
+          // Container das imagens
+          const imagesContainer = document.createElement('div');
+          imagesContainer.style.cssText = `
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: flex-start;
+          `;
+          
+          // Preview com label (quando 'yes')
+          const withLabelContainer = document.createElement('div');
+          withLabelContainer.className = 'preview-with-label';
+          withLabelContainer.style.cssText = `
+            flex: 1;
+            min-width: 200px;
+            text-align: center;
+          `;
+          
+          const withLabelTitle = document.createElement('p');
+          withLabelTitle.textContent = 'Com valores na barra (Sim)';
+          withLabelTitle.style.cssText = `
+            margin: 0 0 8px 0;
+            font-weight: bold;
+            font-size: 13px;
+            color: #0073aa;
+          `;
+          
+          const withLabelImg = document.createElement('img');
+          withLabelImg.src = barImages.with_label || '/wp-content/plugins/woo-better-shipping-calculator-for-brazil/Includes/assets/images/barWithLabel.png';
+          withLabelImg.alt = 'Barra com valores';
+          withLabelImg.style.cssText = `
+            max-width: 100%;
+            height: auto;
+          `;
+          
+          withLabelContainer.appendChild(withLabelTitle);
+          withLabelContainer.appendChild(withLabelImg);
+          
+          // Preview sem label (quando 'no')
+          const withoutLabelContainer = document.createElement('div');
+          withoutLabelContainer.className = 'preview-without-label';
+          withoutLabelContainer.style.cssText = `
+            flex: 1;
+            min-width: 200px;
+            text-align: center;
+          `;
+          
+          const withoutLabelTitle = document.createElement('p');
+          withoutLabelTitle.textContent = 'Sem valores na barra (Não)';
+          withoutLabelTitle.style.cssText = `
+            margin: 0 0 8px 0;
+            font-weight: bold;
+            font-size: 13px;
+            color: #0073aa;
+          `;
+          
+          const withoutLabelImg = document.createElement('img');
+          withoutLabelImg.src = barImages.without_label || '/wp-content/plugins/woo-better-shipping-calculator-for-brazil/Includes/assets/images/barWithoutLabel.png';
+          withoutLabelImg.alt = 'Barra sem valores';
+          withoutLabelImg.style.cssText = `
+            max-width: 100%;
+            height: auto;
+          `;
+          
+          withoutLabelContainer.appendChild(withoutLabelTitle);
+          withoutLabelContainer.appendChild(withoutLabelImg);
+          
+          // Monta a estrutura
+          imagesContainer.appendChild(withLabelContainer);
+          imagesContainer.appendChild(withoutLabelContainer);
+          
+          previewContainer.appendChild(previewTitle);
+          previewContainer.appendChild(imagesContainer);
+          
+          // Adiciona no final do form body
+          formBody.appendChild(previewContainer);
+          
+          // Função para atualizar o highlight baseado na seleção
+          function updatePreviewHighlight() {
+            const selectedValue = Array.from(progressBarRadios).find(radio => radio.checked)?.value;
+            
+            if (selectedValue === 'yes') {
+              withLabelContainer.style.opacity = '1';
+              withoutLabelContainer.style.opacity = '0.5';
+              withLabelTitle.style.color = '#0073aa';
+              withoutLabelTitle.style.color = '#999';
+            } else {
+              withLabelContainer.style.opacity = '0.5';
+              withoutLabelContainer.style.opacity = '1';
+              withLabelTitle.style.color = '#999';
+              withoutLabelTitle.style.color = '#0073aa';
+            }
+          }
+          
+          // Atualiza o highlight inicial
+          updatePreviewHighlight();
+          
+          // Adiciona listeners para mudanças
+          progressBarRadios.forEach(radio => {
+            radio.addEventListener('change', updatePreviewHighlight);
+          });
+        }
+      }
+    }
+
+    const shortcodeElements = document.querySelectorAll('.woo-better-shortcode');
+
+    shortcodeElements.forEach(function (codeEl) {
+      // Cria o botão de copiar
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'woo-better-copy-shortcode-btn';
+      copyBtn.title = 'Copiar shortcode';
+      copyBtn.innerHTML = '📋'; // Ícone de copiar
+
+      // Estilização leve (adicione o resto no CSS)
+      copyBtn.style.marginLeft = '8px';
+      copyBtn.style.cursor = 'pointer';
+      copyBtn.style.border = 'none';
+      copyBtn.style.background = 'transparent';
+      copyBtn.style.fontSize = '16px';
+      copyBtn.style.transition = 'transform 0.2s';
+
+      // Evento de copiar
+      copyBtn.addEventListener('click', function () {
+        const shortcodeText = codeEl.textContent.trim();
+        navigator.clipboard.writeText(shortcodeText).then(function () {
+          // Animação leve
+          copyBtn.innerHTML = '✅';
+          copyBtn.style.transform = 'scale(1.2)';
+          setTimeout(function () {
+            copyBtn.innerHTML = '📋';
+            copyBtn.style.transform = 'scale(1)';
+          }, 1200);
+        });
+      });
+
+      // Insere o botão após o shortcode
+      codeEl.parentNode.insertBefore(copyBtn, codeEl.nextSibling);
+    });
+
+    const positionRadios = document.querySelectorAll('input[name="woo_better_calc_cep_field_position"]');
+    const autoAddressRadios = document.querySelectorAll('input[name="woo_better_calc_enable_auto_address_fill"]');
+
+    function updateAutoAddressState() {
+      // Considera habilitado se algum radio do pai estiver marcado como 'yes'
+      const enabled = Array.from(positionRadios).some(radio => radio.checked && radio.value === 'yes');
+      autoAddressRadios.forEach(radio => {
+        radio.disabled = !enabled;
+        radio.style.cursor = enabled ? '' : 'not-allowed';
+        if (!enabled) {
+          // Se desabilitar o pai, marca 'no' no filho
+          if (radio.value === 'no') {
+            radio.checked = true;
+          } else if (radio.value === 'yes') {
+            radio.checked = false;
+          }
+        }
+      });
+    }
+    if (positionRadios.length > 0 && autoAddressRadios.length > 0) {
+      updateAutoAddressState(); // Estado inicial
+      positionRadios.forEach(radio => {
+        radio.addEventListener('change', updateAutoAddressState);
+      });
+    }
+
     startEvenst('cart');
     startEvenst('product');
 
@@ -1273,6 +1475,7 @@
     handleCustomPosition('product');
     handleCacheSettings();
     handleClearCacheButton();
+    addProgressBarPreview();
 
     if (WCBetterCalcWooVersion.status === 'invalid') {
       // Seleciona todos os inputs e selects com o padrão de name que contenham "cart" ou "product"

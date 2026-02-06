@@ -7,7 +7,7 @@ namespace Composer\Autoload;
 class ComposerStaticInit8ee9bef9805cf2508b18646fb55133e2
 {
     public static $prefixLengthsPsr4 = array (
-        'L' => 
+        'L' =>
         array (
             'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => 51,
             'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => 49,
@@ -16,15 +16,15 @@ class ComposerStaticInit8ee9bef9805cf2508b18646fb55133e2
     );
 
     public static $prefixDirsPsr4 = array (
-        'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => 
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' =>
         array (
             0 => __DIR__ . '/../..' . '/Public',
         ),
-        'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => 
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' =>
         array (
             0 => __DIR__ . '/../..' . '/Includes',
         ),
-        'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' => 
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' =>
         array (
             0 => __DIR__ . '/../..' . '/Admin',
         ),
