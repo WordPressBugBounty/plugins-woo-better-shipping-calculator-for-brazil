@@ -84,7 +84,7 @@ class WcBetterShippingCalculatorForBrazil
         if (defined('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION')) {
             $this->version = WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION;
         } else {
-            $this->version = '4.9.1';
+            $this->version = '4.9.2';
         }
         $this->plugin_name = 'wc-better-shipping-calculator-for-brazil';
 
@@ -5007,12 +5007,13 @@ class WcBetterShippingCalculatorForBrazil
         
         // Adicionar campo de telefone
         if ($phone_required === 'yes') {
+            $priority = ($phone_highlight === 'yes') ? 2 : 90;
             $fields['billing_phone'] = array(
                 'label'       => __('Telefone', 'woo-better-shipping-calculator-for-brazil'),
                 'placeholder' => __('(00) 00000-0000', 'woo-better-shipping-calculator-for-brazil'),
                 'required'    => true,
                 'class'       => array('form-row-wide'),
-                'priority'    => 90,
+                'priority'    => $priority,
                 'type'        => 'tel',
                 'validate'    => array('phone')
             );
@@ -5197,12 +5198,13 @@ class WcBetterShippingCalculatorForBrazil
         
         // Adicionar campo de telefone
         if ($phone_required === 'yes') {
+            $priority = ($phone_highlight === 'yes') ? 2 : 90;
             $fields['shipping_phone'] = array(
                 'label'       => __('Telefone', 'woo-better-shipping-calculator-for-brazil'),
                 'placeholder' => __('(00) 00000-0000', 'woo-better-shipping-calculator-for-brazil'),
                 'required'    => true,
                 'class'       => array('form-row-wide'),
-                'priority'    => 90,
+                'priority'    => $priority,
                 'type'        => 'tel',
                 'validate'    => array('phone')
             );
