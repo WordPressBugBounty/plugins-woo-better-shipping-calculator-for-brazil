@@ -79,7 +79,6 @@ document.addEventListener('DOMContentLoaded', function () {
             input.style.backgroundColor = '#f5f5f5';
             input.style.color = '#999';
             input.style.cursor = 'not-allowed';
-            input.placeholder = 'Selecione uma variação primeiro';
             
             button.style.backgroundColor = '#ccc';
             button.style.color = '#666';
@@ -89,7 +88,6 @@ document.addEventListener('DOMContentLoaded', function () {
             input.style.backgroundColor = WooBetterData.inputStyles.backgroundColor || '#fff';
             input.style.color = WooBetterData.inputStyles.color || '#333';
             input.style.cursor = '';
-            input.placeholder = WooBetterData.placeholder || 'Digite o CEP';
             
             button.style.backgroundColor = WooBetterData.buttonStyles.backgroundColor || '#0073aa';
             button.style.color = WooBetterData.buttonStyles.color || '#fff';
@@ -122,9 +120,12 @@ document.addEventListener('DOMContentLoaded', function () {
                 
                 // Se tem consulta automática habilitada e já tem CEP salvo, faz nova consulta
                 const lastPostcode = getLastUsedPostcode();
-                if (WooBetterData.enable_search === 'yes' && lastPostcode && hasUserMadeQuery) {
+                if (WooBetterData.enable_search === 'yes' && lastPostcode) {
                     setTimeout(() => {
-                        sendCEP(lastPostcode, true);
+                        const submitButton = document.querySelector('.woo-better-button-current-style');
+                        if (submitButton && !submitButton.disabled) {
+                            submitButton.click();
+                        }
                     }, 300);
                 }
             });
@@ -235,9 +236,12 @@ document.addEventListener('DOMContentLoaded', function () {
                             const form = document.querySelector('#custom-postcode-form');
                             processShippingRatesFromCache(cachedData, form, infoBlock, postcode);
                         } else {
-                            // Pequeno delay para garantir que a UI está atualizada e chama sendCEP diretamente
+                            // Pequeno delay para garantir que a UI está atualizada e simula clique no botão
                             setTimeout(() => {
-                                sendCEP(postcode, true);
+                                const submitButton = document.querySelector('.woo-better-button-current-style');
+                                if (submitButton && !submitButton.disabled) {
+                                    submitButton.click();
+                                }
                             }, 300);
                         }
                     }
@@ -290,9 +294,16 @@ document.addEventListener('DOMContentLoaded', function () {
         const button = document.querySelector('.woo-better-button-current-style');
         const input = document.querySelector('.woo-better-input-current-style');
 
-        button.disabled = false;
-        input.disabled = false;
-        button.textContent = originalButtonText;
+        if (button) {
+            button.disabled = false;
+            // Garante que o texto original seja sempre restaurado
+            button.innerHTML = ''; // Limpa qualquer elemento filho (loading icon)
+            button.textContent = originalButtonText || 'CONSULTAR';
+        }
+        
+        if (input) {
+            input.disabled = false;
+        }
 
         const cepBlock = document.querySelector('.woo-better-current-postcode-block');
         if (cepBlock) {
@@ -380,6 +391,21 @@ document.addEventListener('DOMContentLoaded', function () {
             const infoBlock = document.querySelector('.woo-better-info-block');
             if (infoBlock) {
                 infoBlock.style.display = 'none';
+                
+                // Reseta o estado do contentBlock para garantir expansão correta na próxima consulta
+                const contentBlock = infoBlock.querySelector('.woo-better-content-block');
+                if (contentBlock) {
+                    contentBlock.classList.remove('expanded');
+                    contentBlock.style.height = '';
+                    contentBlock.style.display = 'none';
+                }
+                
+                // Reseta o toggle button para o estado padrão (expandido)
+                const toggleButton = infoBlock.querySelector('.woo-better-toggle-button');
+                if (toggleButton) {
+                    toggleButton.innerHTML = '';
+                    displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
+                }
             }
             form.style.display = 'block';
         });
@@ -490,28 +516,28 @@ document.addEventListener('DOMContentLoaded', function () {
             }
 
             .woo-better-update-icon-container {
-                flex-shrink: 0;
-                width: 44px;
-                height: 44px;
+                flex-shrink: 0 !important;
+                width: 44px !important;
+                height: 44px !important;
                 display: flex;
                 align-items: center;
                 justify-content: center;
                 cursor: pointer;
-                border-radius: 50%;
-                border: none;
-                background: transparent;
-                padding: 0;
-                transition: background-color 0.3s ease;
-                outline: none;
+                border-radius: 50% !important;
+                border: none !important;
+                background: transparent !important;
+                padding: 0 !important;
+                transition: background-color 0.3s ease !important;
+                outline: none !important;
             }
 
             .woo-better-update-icon-container:focus {
-                outline: none;
-                box-shadow: none;
+                outline: none !important;
+                box-shadow: none !important;
             }
 
             .woo-better-update-icon-container:hover {
-                background-color: ${themeColor}1a;
+                background-color: ${themeColor}1a !important;
             }
 
             .woo-better-update-icon-container:hover .woo-better-update-icon {
@@ -559,7 +585,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 padding: 3px;
                 font-size: 13px;
                 font-weight: 600;
-                margin: 0 0 4px 0;
+                margin: 0 0 4px 0 !important;
                 color: ${WooBetterData.inputStyles.color || '#333'};
                 opacity: 0.8;
                 transition: all 0.3s ease;
@@ -886,6 +912,9 @@ document.addEventListener('DOMContentLoaded', function () {
         button.type = 'submit';
         button.textContent = 'CONSULTAR';
         button.classList.add('woo-better-button-current-style');
+        
+        // Inicializa o texto original do botão
+        originalButtonText = button.textContent;
         if (font_class) {
             button.classList.add(font_class);
         }
@@ -960,11 +989,13 @@ document.addEventListener('DOMContentLoaded', function () {
                 infoBlock.style.display = 'none';
             }
 
-            // Salva o texto original do botão
-            originalButtonText = button.textContent;
+            // Salva o texto original do botão (se ainda não foi salvo)
+            if (!originalButtonText) {
+                originalButtonText = button.textContent || 'CONSULTAR';
+            }
 
             // Substitui o texto do botão por um ícone de carregamento
-            button.textContent = '';
+            button.innerHTML = ''; // Limpa completamente o conteúdo
             const loadingIcon = document.createElement('span');
             loadingIcon.classList.add('loading-icon'); // Usa a classe definida no CSS
             button.appendChild(loadingIcon);
@@ -1095,7 +1126,10 @@ document.addEventListener('DOMContentLoaded', function () {
                                                 processShippingRatesFromCache(cachedData, form, infoBlock, lastPostcode);
                                             } else {
                                                 setTimeout(() => {
-                                                    sendCEP(lastPostcode, true);
+                                                    const submitButton = document.querySelector('.woo-better-button-current-style');
+                                                    if (submitButton && !submitButton.disabled) {
+                                                        submitButton.click();
+                                                    }
                                                 }, 100);
                                             }
                                         }
@@ -1556,8 +1590,17 @@ document.addEventListener('DOMContentLoaded', function () {
                         displayButton(toggleButton, 'up', 'Esconder detalhes de entrega');
                     }
                     
+                    // Força expansão mesmo se já tinha a classe expanded
                     contentBlock.classList.add('expanded');
                     contentBlock.style.display = 'block';
+                    contentBlock.style.height = `${contentBlock.scrollHeight}px`;
+                    
+                    // Garante altura automática
+                    setTimeout(() => {
+                        if (contentBlock.classList.contains('expanded')) {
+                            contentBlock.style.height = 'auto';
+                        }
+                    }, 300);
                 }
 
                 // Resolve a Promise após a conclusão
@@ -1688,10 +1731,18 @@ document.addEventListener('DOMContentLoaded', function () {
                         contentInfoBlock.style.height = 'auto';
                     }
                 }, { once: true });
-            } else if (contentInfoBlock && contentInfoBlock.classList.contains('expanded')) {
-                // Se já está expandido, apenas atualiza a altura
-                contentInfoBlock.style.height = 'auto';
+            } else if (contentInfoBlock) {
+                // Força reexpansão mesmo se já tinha a classe expanded
+                contentInfoBlock.classList.add('expanded');
                 contentInfoBlock.style.display = 'block';
+                contentInfoBlock.style.height = `${contentInfoBlock.scrollHeight}px`;
+                
+                // Garante altura automática
+                setTimeout(() => {
+                    if (contentInfoBlock.classList.contains('expanded')) {
+                        contentInfoBlock.style.height = 'auto';
+                    }
+                }, 300);
             }
 
         } catch (error) {
