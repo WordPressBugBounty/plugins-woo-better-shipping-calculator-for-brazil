@@ -1138,7 +1138,7 @@ class WcBetterShippingCalculatorForBrazilPublic
             }
 
             // Scripts para máscara de telefone (DDI + formatação)
-            if($phone_mask_enabled === 'yes' && !$is_checkout_classic) {
+            if(($phone_mask_enabled === 'yes' || $phone_highlight === 'yes') && !$is_checkout_classic) {
                 wp_enqueue_style(
                     $this->plugin_name . '-checkout-phone-mask',
                     plugin_dir_url(__FILE__) . 'cssCompiled/WcBetterShippingCalculatorForBrazilCheckoutPhoneMask.COMPILED.css',
@@ -1155,11 +1155,38 @@ class WcBetterShippingCalculatorForBrazilPublic
                     false
                 );
                 
+                // Obter dados de sessão para campo custom phone
+                $custom_phone = '';
+                if (function_exists('WC') && WC()->session) {
+                    $custom_phone = WC()->session->get('custom_phone', '');
+                }
+
+                if(!isset($custom_phone) || empty($custom_phone)) {
+                    // Fallback: tentar pegar do telefone de shipping primeiro
+                    if (function_exists('WC') && WC()->customer) {
+                        $custom_phone = WC()->customer->get_shipping_phone();
+                        
+                        // Se ainda estiver vazio, pegar do telefone de billing
+                        if (empty($custom_phone)) {
+                            $custom_phone = WC()->customer->get_billing_phone();
+                        }
+                    }
+                }
+
+                $custom_country = '+55';
+                if (function_exists('WC') && WC()->session) {
+                    $custom_country = WC()->session->get('billing_phone_country_code', '');
+                }
+                
                 wp_localize_script(
                     $this->plugin_name . '-checkout-phone-mask',
                     'wc_better_checkout_phone_mask_vars',
                     array(
-                        'highlightPhone' => $phone_highlight === 'yes' ? 'true' : 'false'
+                        'highlightPhone' => $phone_highlight === 'yes' ? 'true' : 'false',
+                        'phoneMaskEnabled' => $phone_mask_enabled === 'yes' ? 'true' : 'false',
+                        'phoneRequired' => get_option('woo_better_calc_contact_required', 'no') === 'yes' ? 'true' : 'false',
+                        'customPhone' => $custom_phone,
+                        'customCountry' => $custom_country
                     )
                 );
             }
@@ -1185,7 +1212,9 @@ class WcBetterShippingCalculatorForBrazilPublic
                     $this->plugin_name . '-checkout-phone-mask-shortcode',
                     'wc_better_checkout_phone_mask_vars',
                     array(
-                        'highlightPhone' => $phone_highlight === 'yes' ? true : false
+                        'highlightPhone' => $phone_highlight === 'yes' ? 'true' : 'false',
+                        'phoneMaskEnabled' => $phone_mask_enabled === 'yes' ? 'true' : 'false',
+                        'phoneRequired' => get_option('woo_better_calc_contact_required', 'no') === 'yes' ? 'true' : 'false'
                     )
                 );
             }
