@@ -72,6 +72,31 @@ class WcBetterShippingCalculatorForBrazil
     protected $version;
 
     /**
+     * Flag que indica se o filtro lkn_woo_better_control_rates está sendo chamado
+     * a partir do cálculo de frete de produto único (lkn_register_product_address).
+     * Quando true, o valor mínimo para frete grátis usa o contents_cost do pacote.
+     * Quando false (carrinho/checkout), usa o subtotal total do carrinho.
+     *
+     * @since    4.16.0
+     * @access   private
+     * @var      bool
+     */
+    private $is_product_address_calculation = false;
+
+    /**
+     * Flag que indica que o cálculo de frete está em andamento e que o filtro
+     * woocommerce_cart_get_cart deve remover produtos com frete grátis do array
+     * retornado por WC()->cart->get_cart(). Isso resolve a incompatibilidade com
+     * plugins como o Melhor Envio que leem o carrinho diretamente em vez de usar
+     * os pacotes filtrados via woocommerce_cart_shipping_packages.
+     *
+     * @since    4.16.0
+     * @access   private
+     * @var      bool
+     */
+    private $is_shipping_calculation_active = false;
+
+    /**
      * Define the core functionality of the plugin.
      *
      * Set the plugin name and the plugin version that can be used throughout the plugin.
@@ -85,7 +110,7 @@ class WcBetterShippingCalculatorForBrazil
         if (defined('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION')) {
             $this->version = WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION;
         } else {
-            $this->version = '4.15.2';
+            $this->version = '4.16.1';
         }
         $this->plugin_name = 'wc-better-shipping-calculator-for-brazil';
 
@@ -146,6 +171,21 @@ class WcBetterShippingCalculatorForBrazil
 
         $this->loader->add_action('template_redirect', $this, 'lkn_set_country_brasil', 999);
 
+        // Filtra produtos com frete grátis dos pacotes de cálculo de frete
+        $this->loader->add_filter('woocommerce_cart_shipping_packages', $this, 'lkn_filter_free_shipping_products_from_packages', 999, 1);
+
+        // Filtra produtos com frete grátis do retorno de WC()->cart->get_cart() durante o cálculo de frete.
+        // Isso resolve a incompatibilidade com plugins como o Melhor Envio, que leem o carrinho
+        // diretamente via CartWooCommerceService::getProducts() em vez de usar os pacotes filtrados.
+        $this->loader->add_filter('woocommerce_get_cart_contents', $this, 'lkn_filter_free_shipping_from_cart', 999, 1);
+
+        // Ativa a flag is_shipping_calculation_active ANTES do cálculo dos totais do carrinho,
+        // para que o filtro woocommerce_get_cart_contents possa remover produtos com frete grátis.
+        $this->loader->add_action('woocommerce_before_calculate_totals', $this, 'lkn_set_shipping_calculation_flag', 10, 1);
+
+        // Reseta a flag is_shipping_calculation_active após o cálculo dos totais do carrinho.
+        $this->loader->add_action('woocommerce_after_calculate_totals', $this, 'lkn_reset_shipping_calculation_flag', 10, 1);
+
         if ($disabled_shipping === 'all' || $disabled_shipping === 'digital') {
             $this->loader->add_action('woocommerce_get_country_locale', $this, 'lkn_woo_better_shipping_calculator_locale', 10, 1);
         }
@@ -174,6 +214,13 @@ class WcBetterShippingCalculatorForBrazil
 
         // Hook para adicionar campos customizados na resposta AJAX de detalhes do cliente (admin)
         $this->loader->add_filter('woocommerce_ajax_get_customer_details', $this, 'add_custom_fields_to_customer_details', 10, 3);
+
+        // Hook para adicionar checkbox de frete grátis na aba de entrega do produto
+        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
+        if ($enable_free_shipping_by_product === 'yes') {
+            $this->loader->add_action('woocommerce_product_options_shipping', $this, 'lkn_add_free_shipping_product_checkbox');
+            $this->loader->add_action('woocommerce_process_product_meta', $this, 'lkn_save_free_shipping_product_checkbox');
+        }
     }
 
     public function lkn_show_admin_notice()
@@ -212,7 +259,7 @@ class WcBetterShippingCalculatorForBrazil
             $is_new_install = false;
         } else {
             // Prioridade 2: verifica se dispensou notice de alguma das últimas versões
-            $old_versions   = array( '4.15.1', '4.15.0', '4.14.0', '4.13.0', '4.12.5', '4.12.4', '4.12.3', '4.12.2', '4.12.1' );
+            $old_versions   = array( '4.16.0', '4.15.2', '4.15.1', '4.15.0', '4.14.0', '4.13.0', '4.12.5', '4.12.4', '4.12.3', '4.12.2' );
             $is_new_install = true;
             foreach ( $old_versions as $old_version ) {
                 if ( get_user_meta( get_current_user_id(), 'woo_better_calc_notice_dismissed_' . $old_version, true ) ) {
@@ -261,7 +308,7 @@ class WcBetterShippingCalculatorForBrazil
                             ✨ <strong>Novo:</strong> Formato para o CNPJ alfanumérico (IN RFB 2.229/2024).
                         </p>
                         <p style="font-size: 14px; margin-top: 6px;">
-                            🔧 <strong>Ajuste:</strong> Evento de clique para fechar notificação e formato de envio do CEP para a API.
+                            🔧 <strong>Ajuste:</strong> Novo sistema de frete por produto, prazos e comportamentos para frete grátis, além de ajustes na calculadora e no campo de número do Gutenberg.
                         </p>
                     </div>
 
@@ -345,11 +392,188 @@ class WcBetterShippingCalculatorForBrazil
         }
     }
 
+    /**
+     * Adiciona checkbox de frete grátis na aba de entrega do produto (admin).
+     *
+     * @return void
+     */
+    public function lkn_add_free_shipping_product_checkbox()
+    {
+        woocommerce_wp_checkbox(array(
+            'id'            => '_wc_better_free_shipping',
+            'label'         => __('Frete Grátis para este Produto', 'woo-better-shipping-calculator-for-brazil'),
+            'description'   => __('Ativa o frete grátis exclusivamente para este item. Se o cliente adicionar este produto junto com outros que possuem frete pago no carrinho, o cálculo do frete ignorará este item e cobrará apenas o valor de envio dos demais produtos.', 'woo-better-shipping-calculator-for-brazil'),
+            'desc_tip'      => true,
+        ));
+    }
+
+    /**
+     * Salva o valor do checkbox de frete grátis por produto.
+     *
+     * @param int $post_id ID do produto.
+     * @return void
+     */
+    public function lkn_save_free_shipping_product_checkbox($post_id)
+    {
+        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
+        if ($enable_free_shipping_by_product !== 'yes') {
+            return;
+        }
+
+        $free_shipping = isset($_POST['_wc_better_free_shipping']) ? 'yes' : 'no';
+        update_post_meta($post_id, '_wc_better_free_shipping', $free_shipping);
+    }
+
+    /**
+     * Filtra produtos com frete grátis (_wc_better_free_shipping) dos pacotes de cálculo de frete.
+     *
+     * Quando um produto tem a flag _wc_better_free_shipping = 'yes', ele é removido do pacote
+     * de cálculo para que os plugins de frete (Correios, Melhor Envio, etc.) não o considerem
+     * no cálculo do valor de envio. Apenas os produtos SEM frete grátis terão frete calculado.
+     *
+     * Caso TODOS os produtos do carrinho tenham frete grátis, mantém o pacote intacto para que
+     * o WooCommerce possa aplicar a lógica de frete grátis total posteriormente.
+     *
+     * @param array $packages Pacotes de envio a serem calculados.
+     * @return array Pacotes de envio modificados, sem os produtos com frete grátis.
+     * @since 4.16.0
+     */
+    public function lkn_filter_free_shipping_products_from_packages($packages)
+    {
+        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
+
+        // Só aplica o filtro se a funcionalidade de frete grátis por produto estiver habilitada
+        if ($enable_free_shipping_by_product !== 'yes') {
+            return $packages;
+        }
+
+        // Verifica se o contexto do WooCommerce é válido
+        if (!$this->is_valid_woocommerce_context() || !isset(WC()->cart)) {
+            return $packages;
+        }
+
+        foreach ($packages as $package_key => $package) {
+            if (!isset($package['contents']) || !is_array($package['contents'])) {
+                continue;
+            }
+
+            $free_shipping_items = array();
+            $paid_shipping_items = array();
+
+            // Separa os itens entre frete grátis e frete pago
+            foreach ($package['contents'] as $item_key => $item) {
+                $product_id = isset($item['product_id']) ? $item['product_id'] : 0;
+                $product_free_shipping = get_post_meta($product_id, '_wc_better_free_shipping', true);
+
+                if ($product_free_shipping === 'yes') {
+                    $free_shipping_items[$item_key] = $item;
+                } else {
+                    $paid_shipping_items[$item_key] = $item;
+                }
+            }
+
+            // Se há itens com frete grátis E itens com frete pago, remove os itens com frete grátis
+            // para que os plugins de frete calculem apenas com base nos itens com frete pago
+            if (!empty($free_shipping_items) && !empty($paid_shipping_items)) {
+                $packages[$package_key]['contents'] = $paid_shipping_items;
+
+                // Recalcula o custo do conteúdo do pacote apenas com os itens pagos
+                $new_contents_cost = 0;
+                foreach ($paid_shipping_items as $item) {
+                    $new_contents_cost += floatval(isset($item['line_total']) ? $item['line_total'] : $item['line_subtotal']);
+                }
+                $packages[$package_key]['contents_cost'] = $new_contents_cost;
+            }
+            // Se todos os itens têm frete grátis, mantém o pacote intacto
+            // (a lógica de frete grátis total é tratada em lkn_woo_better_control_rates)
+        }
+
+        return $packages;
+    }
+
+    /**
+     * Filtra produtos com frete grátis do retorno de WC()->cart->get_cart().
+     *
+     * Devido ao comportamento do plugin do Melhor Envio, que obtém os produtos
+     * diretamente do carrinho via CartWooCommerceService::getProducts() (que chama
+     * $woocommerce->cart->get_cart()), ignorando os pacotes já filtrados pelo hook
+     * woocommerce_cart_shipping_packages, este filtro remove os produtos com frete
+     * grátis da resposta de get_cart() quando um cálculo de frete está em andamento.
+     *
+     * @param array $cart_contents Conteúdo do carrinho.
+     * @return array Conteúdo do carrinho sem produtos com frete grátis (quando aplicável).
+     * @since 4.16.0
+     */
+    public function lkn_filter_free_shipping_from_cart($cart_contents)
+    {
+        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
+
+        if ($enable_free_shipping_by_product !== 'yes') {
+            return $cart_contents;
+        }
+
+        if (!$this->is_shipping_calculation_active) {
+            return $cart_contents;
+        }
+
+        if (!$this->is_valid_woocommerce_context() || !isset(WC()->cart)) {
+            return $cart_contents;
+        }
+
+        $free_shipping_items = array();
+        $paid_shipping_items = array();
+
+        foreach ($cart_contents as $item_key => $item) {
+            $product_id = isset($item['product_id']) ? $item['product_id'] : 0;
+            $product_free_shipping = get_post_meta($product_id, '_wc_better_free_shipping', true);
+
+            if ($product_free_shipping === 'yes') {
+                $free_shipping_items[$item_key] = $item;
+            } else {
+                $paid_shipping_items[$item_key] = $item;
+            }
+        }
+
+        // Se há itens com frete grátis E itens com frete pago, retorna apenas os pagos
+        // Se todos são frete grátis ou todos são pagos, retorna o carrinho intacto
+        if (!empty($free_shipping_items) && !empty($paid_shipping_items)) {
+            return $paid_shipping_items;
+        }
+
+        return $cart_contents;
+    }
+
+    /**
+     * Ativa a flag is_shipping_calculation_active antes do cálculo dos totais.
+     *
+     * @param WC_Cart $cart O carrinho do WooCommerce.
+     * @return void
+     * @since 4.16.0
+     */
+    public function lkn_set_shipping_calculation_flag($cart)
+    {
+        $this->is_shipping_calculation_active = true;
+    }
+
+    /**
+     * Reseta a flag is_shipping_calculation_active após o cálculo dos totais.
+     *
+     * @param WC_Cart $cart O carrinho do WooCommerce.
+     * @return void
+     * @since 4.16.0
+     */
+    public function lkn_reset_shipping_calculation_flag($cart)
+    {
+        $this->is_shipping_calculation_active = false;
+    }
+
     public function lkn_woo_better_control_rates($rates, $package)
     {
+        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
         $enable_min = get_option('woo_better_enable_min_free_shipping', 'no');
         $min_value = floatval(get_option('woo_better_min_free_shipping_value', 0));
         $only_free_shipping = get_option('woo_better_only_free_shipping', 'yes');
+        $keep_other_methods = get_option('woo_better_keep_other_methods_with_free_shipping', 'yes');
         $avoid_free_shipping_duplication = get_option('woo_better_avoid_free_shipping_duplication', 'no');
 
 
@@ -365,41 +589,115 @@ class WcBetterShippingCalculatorForBrazil
             $rates['simulado_playground'] = $rate;
         }
 
-        // Só aplica se estiver habilitado e valor for maior que zero
-        if ($enable_min === 'yes') {
-            $cart_total = WC()->cart->get_displayed_subtotal();
+        // Verifica se já existe um frete grátis vindo do WooCommerce nativamente
+        $has_free_shipping = false;
+        if ($avoid_free_shipping_duplication === 'yes') {
+            foreach ($rates as $rate) {
+                if (isset($rate) && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
+                    $has_free_shipping = true;
+                    break;
+                }
+            }
+        }
+
+        // ── PRIORIDADE 1: Frete Grátis por Valor Mínimo do Carrinho ─────────
+        // Tem prioridade sobre o frete por produto quando o valor mínimo é atingido
+        if ($enable_min === 'yes' && ! $has_free_shipping) {
+            // No cálculo de produto único (lkn_register_product_address), o carrinho é
+            // temporariamente substituído por um item simulado. Nesse caso, usamos o
+            // contents_cost do pacote, que contém o valor correto do produto único.
+            // No carrinho/checkout, usamos o subtotal total do carrinho normalmente.
+            if ($this->is_product_address_calculation) {
+                $cart_total = isset($package['contents_cost']) ? floatval($package['contents_cost']) : 0;
+            } else {
+                $cart_total = WC()->cart->get_displayed_subtotal();
+            }
             if ($cart_total >= $min_value) {
-                $has_free_shipping = false;
-                if ($avoid_free_shipping_duplication === 'yes') {
-                    foreach ($rates as $rate) {
-                        if (isset($rate) && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
-                            $has_free_shipping = true;
-                            break;
+                $min_free_shipping_label = __('Frete Gratuito (Valor mínimo)', 'woo-better-shipping-calculator-for-brazil');
+                $min_delivery_time = get_option('woo_better_min_free_shipping_delivery_time', '');
+                if (!empty($min_delivery_time)) {
+                    $min_free_shipping_label .= ' (' . $min_delivery_time . ')';
+                }
+
+                $has_free_shipping = true; // Marca que já temos frete grátis (evita que o frete por produto seja adicionado)
+                $free_shipping_rate = new \WC_Shipping_Rate(
+                    'free_shipping_min',
+                    $min_free_shipping_label,
+                    0,
+                    array(),
+                    'free_shipping'
+                );
+                if ($keep_other_methods === 'no') {
+                    // Mantém apenas fretes gratuitos (cost == 0) e adiciona o nosso
+                    $new_rates = array('free_shipping_min' => $free_shipping_rate);
+                    foreach ($rates as $key => $rate) {
+                        if ($key !== 'free_shipping_min' && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
+                            $new_rates[$key] = $rate;
                         }
+                    }
+                    $rates = $new_rates;
+                    return $rates;
+                } else {
+                    $new_rates = array('free_shipping_min' => $free_shipping_rate);
+                    foreach ($rates as $key => $rate) {
+                        if ($key !== 'free_shipping_min') {
+                            $new_rates[$key] = $rate;
+                        }
+                    }
+                    $rates = $new_rates;
+                }
+            }
+        }
+
+        // ── PRIORIDADE 2: Frete Grátis por Produto ──────────────────────────
+        // Só aplica se não houver frete grátis nativo ou por valor mínimo (quando evitar duplicação ativo)
+        if ($enable_free_shipping_by_product === 'yes' && ! $has_free_shipping) {
+            $all_products_free_shipping = true;
+            if ($this->is_valid_woocommerce_context() && isset(WC()->cart)) {
+                foreach (WC()->cart->get_cart() as $cart_item) {
+                    $product_id = $cart_item['product_id'];
+                    $product_free_shipping = get_post_meta($product_id, '_wc_better_free_shipping', true);
+                    if ($product_free_shipping !== 'yes') {
+                        $all_products_free_shipping = false;
+                        break;
                     }
                 }
-                // Só adiciona se não houver frete grátis existente
-                if (! $has_free_shipping) {
-                    $free_shipping_rate = new \WC_Shipping_Rate(
-                        'free_shipping_min',
-                        __('Frete Gratuito', 'woo-better-shipping-calculator-for-brazil'),
-                        0,
-                        array(),
-                        'free_shipping'
-                    );
-                    if ($only_free_shipping === 'yes') {
-                        // Remove todas as opções de frete e exibe apenas o frete grátis
-                        $rates = array('free_shipping_min' => $free_shipping_rate);
-                    } else {
-                        // Insere o frete grátis na primeira posição do array de métodos
-                        $new_rates = array('free_shipping_min' => $free_shipping_rate);
-                        foreach ($rates as $key => $rate) {
-                            if ($key !== 'free_shipping_min') {
-                                $new_rates[$key] = $rate;
-                            }
+            } else {
+                $all_products_free_shipping = false;
+            }
+
+            if ($all_products_free_shipping) {
+                $product_free_shipping_label = __('Frete Grátis (Produto)', 'woo-better-shipping-calculator-for-brazil');
+                $product_delivery_time = get_option('woo_better_free_shipping_by_product_delivery_time', '');
+                if (!empty($product_delivery_time)) {
+                    $product_free_shipping_label .= ' (' . $product_delivery_time . ')';
+                }
+
+                $free_shipping_rate = new \WC_Shipping_Rate(
+                    'free_shipping_product',
+                    $product_free_shipping_label,
+                    0,
+                    array(),
+                    'free_shipping'
+                );
+                if ($keep_other_methods === 'no') {
+                    // Mantém apenas fretes gratuitos (cost == 0) e adiciona o nosso
+                    $new_rates = array('free_shipping_product' => $free_shipping_rate);
+                    foreach ($rates as $key => $rate) {
+                        if ($key !== 'free_shipping_product' && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
+                            $new_rates[$key] = $rate;
                         }
-                        $rates = $new_rates;
                     }
+                    $rates = $new_rates;
+                    return $rates;
+                } else {
+                    $new_rates = array('free_shipping_product' => $free_shipping_rate);
+                    foreach ($rates as $key => $rate) {
+                        if ($key !== 'free_shipping_product') {
+                            $new_rates[$key] = $rate;
+                        }
+                    }
+                    $rates = $new_rates;
                 }
             }
         }
@@ -1034,6 +1332,9 @@ class WcBetterShippingCalculatorForBrazil
         
         // Hook para formatação de endereço na página Minha Conta
         $this->loader->add_filter('woocommerce_my_account_my_address_formatted_address', $this, 'my_account_formatted_address', 10, 3);
+
+        // Integração com FunnelKit Checkout: habilita blocos brasileiros no drag-and-drop
+        $this->loader->add_filter('pre_option_wcbcf_settings', $this, 'funnelkit_get_wcbcf_settings', 10, 1);
     }
 
     public function postcode_param_priority( $params ) {
@@ -2497,11 +2798,6 @@ class WcBetterShippingCalculatorForBrazil
         // Valida o documento primeiro para determinar o tipo
         $validation = $this->validate_document($document_to_validate);
         
-        // Se for CPF, desativa a validação (retorna early)
-        if ($validation['type'] === 'cpf') {
-            return;
-        }
-        
         // Verifica se é válido
         if (!$validation['is_valid']) {
             wc_add_notice($validation['message'], 'error');
@@ -3034,14 +3330,9 @@ class WcBetterShippingCalculatorForBrazil
             $shipping_number = '';
             $billing_number = '';
 
-            // Captura dos dados do checkout tradicional
-            if (isset($_POST['billing_number'])) {
-                $billing_number = sanitize_text_field(wp_unslash($_POST['billing_number']));
-            }
-
-            if (isset($_POST['shipping_number'])) {
-                $shipping_number = sanitize_text_field(wp_unslash($_POST['shipping_number']));
-            }
+            // Captura dos dados do checkout tradicional (via $data, já filtrado por woocommerce_checkout_posted_data)
+            $billing_number = isset($data['billing_number']) ? sanitize_text_field(wp_unslash($data['billing_number'])) : '';
+            $shipping_number = isset($data['shipping_number']) ? sanitize_text_field(wp_unslash($data['shipping_number'])) : '';
 
             // Detecta se está usando o mesmo endereço
             $use_same_address = $this->detect_same_address_usage($order, $data);
@@ -3063,11 +3354,6 @@ class WcBetterShippingCalculatorForBrazil
                 if (empty($billing_number) && !empty($shipping_number)) {
                     $billing_number = $shipping_number;
                 }
-            }
-
-            if (empty($shipping_number) && empty($billing_number)) {
-                $shipping_number = "S/N";
-                $billing_number = "S/N";
             }
             
             // Salva os números como meta dados separados (sem concatenar no endereço)
@@ -3136,11 +3422,6 @@ class WcBetterShippingCalculatorForBrazil
             if (empty($billing_number) && !empty($shipping_number)) {
                 $billing_number = $shipping_number;
             }
-
-            if (empty($shipping_number) && empty($billing_number)) {
-                $shipping_number = "S/N";
-                $billing_number = "S/N";
-            }
             
             // Salva os números como meta dados separados (sem concatenar no endereço)
             if (!empty($billing_number)) {
@@ -3173,14 +3454,14 @@ class WcBetterShippingCalculatorForBrazil
         $person_type = get_option('woo_better_calc_person_type_select', 'none');
 
         if ($person_type !== 'none') {
-            // Captura dos dados do checkout tradicional
-            $billing_persontype = isset($_POST['billing_persontype']) ? sanitize_text_field(wp_unslash($_POST['billing_persontype'])) : '';
-            $billing_cpf = isset($_POST['billing_cpf']) ? sanitize_text_field(wp_unslash($_POST['billing_cpf'])) : '';
-            $billing_cnpj = isset($_POST['billing_cnpj']) ? sanitize_text_field(wp_unslash($_POST['billing_cnpj'])) : '';
-            $billing_company = isset($_POST['billing_company']) ? sanitize_text_field(wp_unslash($_POST['billing_company'])) : '';
+            // Captura dos dados do checkout tradicional (via $data, já filtrado por woocommerce_checkout_posted_data)
+            $billing_persontype = isset($data['billing_persontype']) ? sanitize_text_field(wp_unslash($data['billing_persontype'])) : '';
+            $billing_cpf = isset($data['billing_cpf']) ? sanitize_text_field(wp_unslash($data['billing_cpf'])) : '';
+            $billing_cnpj = isset($data['billing_cnpj']) ? sanitize_text_field(wp_unslash($data['billing_cnpj'])) : '';
+            $billing_company = isset($data['billing_company']) ? sanitize_text_field(wp_unslash($data['billing_company'])) : '';
             
             // Captura do campo unificado
-            $billing_document = isset($_POST['billing_document']) ? sanitize_text_field(wp_unslash($_POST['billing_document'])) : '';
+            $billing_document = isset($data['billing_document']) ? sanitize_text_field(wp_unslash($data['billing_document'])) : '';
             
             // Se há documento unificado mas não há dados específicos, processar
             if (!empty($billing_document) && empty($billing_cpf) && empty($billing_cnpj)) {
@@ -4702,6 +4983,7 @@ class WcBetterShippingCalculatorForBrazil
         // Dados básicos do carrinho
         $cart_total = $cart->get_displayed_subtotal();
         $has_free_shipping = false;
+        $is_free_shipping_by_product_rate = false;
         
         // Verifica se há métodos de envio disponíveis e se algum é gratuito
         if ($customer && method_exists($customer, 'get_shipping_postcode') && !empty($customer->get_shipping_postcode())) {
@@ -4717,19 +4999,24 @@ class WcBetterShippingCalculatorForBrazil
                 
                 if (!empty($stored_rates['rates'])) {
                     foreach ($stored_rates['rates'] as $rate_id => $rate) {
-                        // ✅ NOVA LÓGICA: Verifica se existe frete grátis DISPONÍVEL (não precisa estar selecionado)
+                        // Verifica se existe frete grátis DISPONÍVEL (não precisa estar selecionado)
                         if (floatval($rate->cost) === 0.0) {
                             $has_free_shipping = true;
+                            // Verifica se o label da rate contém "Frete Grátis (Produto)" (criado pelo nosso plugin)
+                            if (method_exists($rate, 'get_label') && strpos($rate->get_label(), 'Frete Grátis (Produto)') !== false) {
+                                $is_free_shipping_by_product_rate = true;
+                            }
                             break 2; // Sai dos dois loops - encontrou frete grátis disponível
                         }
                     }
                 }
             }
         }
-        
+
         wp_send_json_success([
             'freeShipping' => $has_free_shipping,
-            'cartTotal' => $cart_total
+            'cartTotal' => $cart_total,
+            'freeShippingByProduct' => $is_free_shipping_by_product_rate
         ]);
     }
 
@@ -4924,9 +5211,13 @@ class WcBetterShippingCalculatorForBrazil
         );
 
         // 5. Calcula o frete para este pacote
+        // Define a flag para que lkn_woo_better_control_rates saiba que está no contexto
+        // de produto único e use o contents_cost do pacote em vez do subtotal do carrinho.
+        $this->is_product_address_calculation = true;
         $shipping = WC()->shipping();
         $shipping->load_shipping_methods();
         $calculated_package = $shipping->calculate_shipping_for_package( $package, 0 );
+        $this->is_product_address_calculation = false;
 
         // 6. RESTAURA O CARRINHO ORIGINAL DO USUÁRIO IMEDIATAMENTE!
         // Como não usamos o set_session(), o banco de dados do cliente não é tocado.
@@ -4948,9 +5239,10 @@ class WcBetterShippingCalculatorForBrazil
         if ( isset( $calculated_package['rates'] ) && is_array( $calculated_package['rates'] ) ) {
             foreach ( $calculated_package['rates'] as $rate ) {
                 $shipping_rates[] = array(
-                    'id'    => $rate->get_id(),
-                    'label' => $rate->get_label(),
-                    'cost'  => $rate->get_cost(),
+                    'id'        => $rate->get_id(),
+                    'label'     => $rate->get_label(),
+                    'cost'      => $rate->get_cost(),
+                    'meta_data' => $rate->get_meta_data(),
                 );
             }
         }
@@ -5256,9 +5548,10 @@ class WcBetterShippingCalculatorForBrazil
                 if (isset($package['rates']) && is_array($package['rates'])) {
                     foreach ($package['rates'] as $rate) {
                         $shipping_rates[] = array(
-                            'id'    => $rate->get_id(),
-                            'label' => $rate->get_label(),
-                            'cost'  => $rate->get_cost(),
+                            'id'        => $rate->get_id(),
+                            'label'     => $rate->get_label(),
+                            'cost'      => $rate->get_cost(),
+                            'meta_data' => $rate->get_meta_data(),
                         );
                 }
             }
@@ -5378,9 +5671,9 @@ class WcBetterShippingCalculatorForBrazil
         $neighborhood_enabled = get_option('woo_better_calc_enable_neighborhood_field', 'no');
         
         if ($neighborhood_enabled === 'yes') {
-            // Captura dos dados do checkout tradicional
-            $billing_neighborhood = isset($_POST['billing_neighborhood']) ? sanitize_text_field(wp_unslash($_POST['billing_neighborhood'])) : '';
-            $shipping_neighborhood = isset($_POST['shipping_neighborhood']) ? sanitize_text_field(wp_unslash($_POST['shipping_neighborhood'])) : '';
+            // Captura dos dados do checkout tradicional (via $data, já filtrado por woocommerce_checkout_posted_data)
+            $billing_neighborhood = isset($data['billing_neighborhood']) ? sanitize_text_field(wp_unslash($data['billing_neighborhood'])) : '';
+            $shipping_neighborhood = isset($data['shipping_neighborhood']) ? sanitize_text_field(wp_unslash($data['shipping_neighborhood'])) : '';
 
             // Detecta se está usando o mesmo endereço
             $use_same_address = $this->detect_same_address_usage($order, $data);
@@ -5492,8 +5785,8 @@ class WcBetterShippingCalculatorForBrazil
         $birthdate_enabled = get_option('woo_better_calc_enable_birthdate_field', 'no');
         
         if ($birthdate_enabled === 'yes') {
-            // Captura dos dados do checkout tradicional
-            $billing_birthdate = isset($_POST['billing_birthdate']) ? sanitize_text_field(wp_unslash($_POST['billing_birthdate'])) : '';
+            // Captura dos dados do checkout tradicional (via $data, já filtrado por woocommerce_checkout_posted_data)
+            $billing_birthdate = isset($data['billing_birthdate']) ? sanitize_text_field(wp_unslash($data['billing_birthdate'])) : '';
 
             // Normaliza para Y-m-d antes de salvar
             $billing_birthdate = $this->normalize_birthdate_value($billing_birthdate);
@@ -5602,8 +5895,8 @@ class WcBetterShippingCalculatorForBrazil
         $gender_enabled = get_option('woo_better_calc_enable_gender_field', 'no');
         
         if ($gender_enabled === 'yes') {
-            // Captura dos dados do checkout tradicional
-            $billing_gender = isset($_POST['billing_gender']) ? sanitize_text_field(wp_unslash($_POST['billing_gender'])) : '';
+            // Captura dos dados do checkout tradicional (via $data, já filtrado por woocommerce_checkout_posted_data)
+            $billing_gender = isset($data['billing_gender']) ? sanitize_text_field(wp_unslash($data['billing_gender'])) : '';
 
             // CORREÇÃO: Sempre salva gênero quando habilitado para evitar dados antigos "Masculino"
             $order->update_meta_data('_billing_gender', $billing_gender);
@@ -5680,10 +5973,10 @@ class WcBetterShippingCalculatorForBrazil
 
         // Determina se o documento submetido é um CNPJ (14 dígitos)
         $billing_document = '';
-        if (!empty($_POST['billing_cnpj'])) {
-            $billing_document = sanitize_text_field(wp_unslash($_POST['billing_cnpj']));
-        } elseif (!empty($_POST['billing_document'])) {
-            $billing_document = sanitize_text_field(wp_unslash($_POST['billing_document']));
+        if (!empty($data['billing_cnpj'])) {
+            $billing_document = sanitize_text_field(wp_unslash($data['billing_cnpj']));
+        } elseif (!empty($data['billing_document'])) {
+            $billing_document = sanitize_text_field(wp_unslash($data['billing_document']));
         }
         $is_cnpj = strlen(preg_replace('/[^0-9A-Z]/', '', strtoupper($billing_document))) === 14;
 
@@ -5695,7 +5988,7 @@ class WcBetterShippingCalculatorForBrazil
             return;
         }
 
-        $billing_ie = isset($_POST['billing_ie']) ? strtoupper(sanitize_text_field(wp_unslash($_POST['billing_ie']))) : '';
+        $billing_ie = isset($data['billing_ie']) ? strtoupper(sanitize_text_field(wp_unslash($data['billing_ie']))) : '';
 
         $order->update_meta_data('_billing_ie', $billing_ie);
 
@@ -6982,5 +7275,39 @@ class WcBetterShippingCalculatorForBrazil
         }
 
         return $data;
+    }
+
+    /**
+     * Integração com FunnelKit Checkout.
+     *
+     * Retorna wcbcf_settings baseadas nas opções reais do plugin, para que o
+     * FunnelKit libere no editor drag-and-drop apenas os blocos cujos campos
+     * estão ativos nas configurações.
+     *
+     * @since    4.16.0
+     * @param    mixed $default Valor padrão (ignorado).
+     * @return   array
+     */
+    public function funnelkit_get_wcbcf_settings($default) {
+        $person_type          = get_option('woo_better_calc_person_type_select', 'none');
+        $ie_enabled           = get_option('woo_better_calc_enable_ie_field', 'no');
+        $birthdate_enabled    = get_option('woo_better_calc_enable_birthdate_field', 'no');
+        $gender_enabled       = get_option('woo_better_calc_enable_gender_field', 'no');
+        $cell_phone_enabled   = get_option('woo_better_calc_contact_required', 'no');
+        $number_enabled       = get_option('woo_better_calc_number_required', 'no');
+        $neighborhood_enabled = get_option('woo_better_calc_enable_neighborhood_field', 'no');
+
+        return array(
+            'person_type'  => ($person_type !== 'none') ? 1 : 0,
+            'ie'           => (
+                $ie_enabled === 'yes'
+                && in_array($person_type, array('legal', 'both'), true)
+            ) ? 1 : 0,
+            'birthdate'    => ($birthdate_enabled === 'yes') ? 1 : 0,
+            'gender'       => ($gender_enabled === 'yes') ? 1 : 0,
+            'cell_phone'   => ($cell_phone_enabled === 'yes') ? 1 : 0,
+            'number'       => ($number_enabled === 'yes') ? 1 : 0,
+            'neighborhood' => ($neighborhood_enabled === 'yes') ? 1 : 0,
+        );
     }
 }

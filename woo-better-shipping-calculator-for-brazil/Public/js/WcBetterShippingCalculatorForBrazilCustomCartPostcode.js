@@ -107,6 +107,48 @@ document.addEventListener('DOMContentLoaded', function () {
         return cleanCep;
     }
 
+    /**
+     * Complementa o label do frete com prazo de entrega contido no meta_data,
+     * caso o label ainda não inclua essa informação.
+     *
+     * @param {string} label     Label original do método de entrega.
+     * @param {object} metaData  Meta dados do rate (ex: delivery_time, delivery_range).
+     * @return {string} Label com prazo anexado quando disponível e ausente.
+     */
+    function getDisplayLabel(label, metaData) {
+        if (!metaData || typeof metaData !== 'object') return label;
+
+        let deliveryStr = '';
+
+        // Busca por chaves comuns de prazo de entrega
+        if (metaData.delivery_time && String(metaData.delivery_time).trim()) {
+            deliveryStr = String(metaData.delivery_time).trim();
+        } else if (metaData.delivery_range && String(metaData.delivery_range).trim()) {
+            deliveryStr = String(metaData.delivery_range).trim();
+        } else if (metaData.DELIVERY_FORECAST && String(metaData.DELIVERY_FORECAST).trim()) {
+            deliveryStr = String(metaData.DELIVERY_FORECAST).trim();
+        }
+
+        if (!deliveryStr) return label;
+
+        // Se for apenas número: "5" → "(5 dias úteis)"
+        if (/^\d+$/.test(deliveryStr)) {
+            var days = parseInt(deliveryStr, 10);
+            deliveryStr = days === 1 ? '(1 dia útil)' : '(' + days + ' dias úteis)';
+        }
+        // Garante que esteja entre parênteses
+        if (!/^\(/.test(deliveryStr)) {
+            deliveryStr = '(' + deliveryStr + ')';
+        }
+
+        // Se o label já contém prazo, não duplica
+        if (/\([^)]*\d+\s*dia[^)]*\)/i.test(label)) {
+            return label;
+        }
+
+        return label + ' ' + deliveryStr;
+    }
+
     // Função para aplicar formatação em um input de CEP
     function applyFormatToInput(input, value) {
         if (!input) return;
@@ -597,7 +639,7 @@ document.addEventListener('DOMContentLoaded', function () {
             tempDiv.innerHTML = cartInfo.currency_symbol;
             const decodedSymbol = tempDiv.textContent || tempDiv.innerText || cartInfo.currency_symbol;
 
-            listItem.innerHTML = `<strong>${decodedSymbol} ${parseFloat(rate.cost).toFixed(cartInfo.currency_minor_unit).replace('.', ',')}</strong> - ${rate.label}`;
+            listItem.innerHTML = `<strong>${decodedSymbol} ${parseFloat(rate.cost).toFixed(cartInfo.currency_minor_unit).replace('.', ',')}</strong> - ${getDisplayLabel(rate.label, rate.meta_data)}`;
             shippingList.appendChild(listItem);
         });
 
@@ -675,7 +717,7 @@ document.addEventListener('DOMContentLoaded', function () {
         form.style.padding = '0px';
 
         const lastPostcode = getLastUsedPostcode();
-        if (lastPostcode && WooBetterData.enable_search === 'yes') {
+        if (lastPostcode && (WooBetterData.enable_search === 'yes' || hasUserMadeQuery)) {
             form.style.display = 'none';
         }
 
@@ -1033,12 +1075,31 @@ document.addEventListener('DOMContentLoaded', function () {
         updateTimeout = setTimeout(() => {
             updateTimeout = null;
             
-            // Invalida o cache
-            invalidateCache();
-            
             const lastPostcode = getLastUsedPostcode();
             const infoBlock = document.querySelector('.woo-better-info-block');
             const form = document.querySelector('#custom-postcode-form');
+
+            // Se a consulta automática está desabilitada mas o usuário já fez uma consulta (hasUserMadeQuery),
+            // NÃO invalida o cache para preservar os dados e poder exibir o infoBlock diretamente
+            if (WooBetterData.enable_search !== 'yes' && hasUserMadeQuery) {
+                // Tenta obter dados do cache diretamente (sem invalidar)
+                const cache = getCartCache();
+                const cachedData = cache[lastPostcode] || null;
+                
+                if (lastPostcode && cachedData && infoBlock && form) {
+                    // Exibe o infoBlock com os dados em cache
+                    processShippingRatesFromCache(cachedData, form, infoBlock, lastPostcode);
+                    // Reseta a flag para não ficar sempre em cache
+                    hasUserMadeQuery = false;
+                    return;
+                }
+                
+                // Se não tem cache válido, reseta a flag e segue fluxo normal
+                hasUserMadeQuery = false;
+            }
+            
+            // Invalida o cache (apenas quando não entrou no branch acima)
+            invalidateCache();
 
             if (lastPostcode && infoBlock && form) {
                 // IMPORTANTE: Verifica se estava expandido ANTES de modificar o display
@@ -1305,6 +1366,9 @@ document.addEventListener('DOMContentLoaded', function () {
                     formData.append('shipping[postcode]', postcodeValue);
                     formData.append('shipping[country]', 'BR');
 
+                    // ✅ Dispara evento para o ProgressBar iniciar loading
+                    document.dispatchEvent(new CustomEvent('woo-better-cart-update-start'));
+
                     fetch(addressAPIUrl, {
                         method: 'POST',
                         headers: {
@@ -1537,7 +1601,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     tempDiv.innerHTML = shippingRates.cart.currency_symbol;
                     const decodedSymbol = tempDiv.textContent || tempDiv.innerText || shippingRates.cart.currency_symbol;
 
-                    listItem.innerHTML = `<strong>${decodedSymbol} ${cost}</strong> - ${rate.label}`;
+                    listItem.innerHTML = `<strong>${decodedSymbol} ${cost}</strong> - ${getDisplayLabel(rate.label, rate.meta_data)}`;
                     shippingList.appendChild(listItem);
                 });
 
@@ -1669,7 +1733,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     tempDiv.innerHTML = shippingRates.cart.currency_symbol;
                     const decodedSymbol = tempDiv.textContent || tempDiv.innerText || shippingRates.cart.currency_symbol;
 
-                    listItem.innerHTML = `<strong>${decodedSymbol} ${cost}</strong> - ${rate.label}`;
+                    listItem.innerHTML = `<strong>${decodedSymbol} ${cost}</strong> - ${getDisplayLabel(rate.label, rate.meta_data)}`;
                     shippingList.appendChild(listItem);
                 });
             }            // Atualiza o CEP no bloco de CEP atual
@@ -2446,7 +2510,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     if (inputPostcode) {
                         inputPostcode.value = lastPostcode;
 
-                        if (WooBetterData.enable_search && WooBetterData.enable_search === 'yes') {
+                        // Se a consulta automática está habilitada OU o usuário já fez uma consulta anterior
+                        const shouldRestoreFromCache = (WooBetterData.enable_search && WooBetterData.enable_search === 'yes') || hasUserMadeQuery;
+
+                        if (shouldRestoreFromCache) {
                             const cachedData = getCachedCartShippingData(lastPostcode);
 
                             if (cachedData) {
@@ -2493,8 +2560,14 @@ document.addEventListener('DOMContentLoaded', function () {
                                         currentPostcodeText.innerHTML = `<strong>CEP</strong>: ${lastPostcode}`;
                                     }
                                 }
+
+                                // Reseta a flag após restaurar do cache para não ficar sempre em cache
+                                hasUserMadeQuery = false;
                             } else {
                                 // Não há dados em cache, simula clique no botão para consulta natural
+                                // Reseta a flag também neste caso, já que não tem cache para restaurar
+                                hasUserMadeQuery = false;
+
                                 form.style.display = 'block';
                                 
                                 const input = form.querySelector('.woo-better-input-current-style');
