@@ -111,7 +111,7 @@ class WcBetterShippingCalculatorForBrazil
         if (defined('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION')) {
             $this->version = WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION;
         } else {
-            $this->version = '4.17.2';
+            $this->version = '4.17.4';
         }
         $this->plugin_name = 'wc-better-shipping-calculator-for-brazil';
 
@@ -283,7 +283,7 @@ class WcBetterShippingCalculatorForBrazil
             $is_new_install = false;
         } else {
             // Prioridade 2: verifica se dispensou notice de alguma das últimas versões
-            $old_versions   = array( '4.17.1', '4.17.0', '4.16.12', '4.16.11', '4.16.10', '4.16.9', '4.16.8', '4.16.7', '4.16.6', '4.16.5', '4.16.4', '4.16.3', '4.16.2', '4.16.1' );
+            $old_versions   = array( '4.17.3', '4.17.2', '4.17.1', '4.17.0', '4.16.12', '4.16.11', '4.16.10', '4.16.9', '4.16.8', '4.16.7', '4.16.6', '4.16.5', '4.16.4', '4.16.3' );
             $is_new_install = true;
             foreach ( $old_versions as $old_version ) {
                 if ( get_user_meta( get_current_user_id(), 'woo_better_calc_notice_dismissed_' . $old_version, true ) ) {
@@ -782,7 +782,7 @@ class WcBetterShippingCalculatorForBrazil
         return $rates;
     }
 
-    public function lkn_custom_disable_shipping()
+    public function lkn_custom_disable_shipping($needs_shipping)
     {
         $disable_shipping_option = get_option('woo_better_calc_disabled_shipping', 'default');
 
@@ -801,10 +801,19 @@ class WcBetterShippingCalculatorForBrazil
 
         if ($disable_shipping_option === 'all' || ($only_virtual && $disable_shipping_option === 'digital')) {
             return false;
-        } else {
-            // Se todos forem virtuais, não precisa de frete
-            return $only_virtual ? false : true;
         }
+
+        // Se todos forem virtuais, não precisa de frete
+        if ($only_virtual) {
+            return false;
+        }
+
+        // REASON: Preserva a decisão nativa do WooCommerce quando o plugin não desabilita
+        // o frete. Retornar `true` incondicional aqui sobrescrevia o filtro
+        // woocommerce_cart_needs_shipping_address e fazia o checkout clássico exibir o
+        // checkbox "Entregar em um endereço diferente?" mesmo com a opção
+        // "Forçar entrega para o endereço de cobrança" (woocommerce_ship_to_destination=billing_only).
+        return $needs_shipping;
     }
 
     public function lkn_set_country_brasil()
@@ -1471,6 +1480,12 @@ class WcBetterShippingCalculatorForBrazil
         $this->loader->add_filter('woocommerce_billing_fields', $this, 'add_edit_address_billing_fields');
         $this->loader->add_filter('woocommerce_shipping_fields', $this, 'add_edit_address_shipping_fields');
         $this->loader->add_action('woocommerce_customer_save_address', $this, 'save_edit_address_custom_fields', 10, 2);
+
+        // Remove a obrigatoriedade da IE no envio da página "minha conta > editar
+        // endereço" quando o documento informado for CPF. O campo é gerado como
+        // required=true (acima) e o JS só cuida do visual; esta é a remoção real
+        // da validação no servidor (WC_Form_Handler::save_address).
+        $this->loader->add_filter('woocommerce_billing_fields', $this, 'disable_ie_required_on_edit_address_submit', 20, 1);
         
         // Hook para formatação de endereço na página Minha Conta
         $this->loader->add_filter('woocommerce_my_account_my_address_formatted_address', $this, 'my_account_formatted_address', 10, 3);
@@ -3912,6 +3927,18 @@ class WcBetterShippingCalculatorForBrazil
                     update_user_meta(get_current_user_id(), 'billing_company', '');
                     update_user_meta(get_current_user_id(), 'shipping_company', '');
                 }
+
+                // REASON: limpa também a sessão, senão o valor antigo de empresa
+                // "ressuscita" ao voltar ao checkout (o preenchimento lê user_meta
+                // e, quando vazio, cai no fallback da sessão).
+                if (function_exists('WC') && WC()->session) {
+                    WC()->session->set('billing_company', '');
+                    WC()->session->set('shipping_company', '');
+                }
+                if (function_exists('WC') && WC()->customer) {
+                    WC()->customer->set_billing_company('');
+                    WC()->customer->set_shipping_company('');
+                }
             }
         }
     }
@@ -4030,6 +4057,18 @@ class WcBetterShippingCalculatorForBrazil
                 if (is_user_logged_in()) {
                     update_user_meta(get_current_user_id(), 'billing_company', '');
                     update_user_meta(get_current_user_id(), 'shipping_company', '');
+                }
+
+                // REASON: limpa também a sessão, senão o valor antigo de empresa
+                // "ressuscita" ao voltar ao checkout (o preenchimento lê user_meta
+                // e, quando vazio, cai no fallback da sessão).
+                if (function_exists('WC') && WC()->session) {
+                    WC()->session->set('billing_company', '');
+                    WC()->session->set('shipping_company', '');
+                }
+                if (function_exists('WC') && WC()->customer) {
+                    WC()->customer->set_billing_company('');
+                    WC()->customer->set_shipping_company('');
                 }
             }
         }
@@ -6434,6 +6473,12 @@ class WcBetterShippingCalculatorForBrazil
             if (is_user_logged_in()) {
                 update_user_meta(get_current_user_id(), 'billing_ie', '');
             }
+
+            // REASON: limpa também a sessão, senão o valor antigo de IE volta
+            // ao checkout (o preenchimento lê user_meta e, vazio, usa a sessão).
+            if (function_exists('WC') && WC()->session) {
+                WC()->session->set('billing_ie', '');
+            }
             return;
         }
 
@@ -6479,6 +6524,12 @@ class WcBetterShippingCalculatorForBrazil
             $order->update_meta_data('_billing_ie', '');
             if (is_user_logged_in()) {
                 update_user_meta(get_current_user_id(), 'billing_ie', '');
+            }
+
+            // REASON: limpa também a sessão, senão o valor antigo de IE volta
+            // ao checkout (o preenchimento lê user_meta e, vazio, usa a sessão).
+            if (function_exists('WC') && WC()->session) {
+                WC()->session->set('billing_ie', '');
             }
             return;
         }
@@ -7419,6 +7470,43 @@ class WcBetterShippingCalculatorForBrazil
             );
         }
         
+        return $fields;
+    }
+
+    /**
+     * Remove a obrigatoriedade da IE no envio da página "editar endereço"
+     * quando o documento enviado é um CPF.
+     *
+     * O WooCommerce valida campos obrigatórios em WC_Form_Handler::save_address
+     * lendo `required` do array retornado por `woocommerce_billing_fields`.
+     * Como esse filtro roda novamente durante o save (com prioridade menor que
+     * este), só ajustamos o required aqui quando é um POST de edição de endereço.
+     *
+     * @param array $fields
+     * @return array
+     */
+    public function disable_ie_required_on_edit_address_submit($fields)
+    {
+        // Apenas no submit do formulário "editar endereço" da Minha Conta.
+        if (! isset($_POST['action']) || 'edit_address' !== $_POST['action']) {
+            return $fields;
+        }
+
+        if (! isset($fields['billing_ie'])) {
+            return $fields;
+        }
+
+        $document = isset($_POST['billing_document']) ? sanitize_text_field(wp_unslash($_POST['billing_document'])) : '';
+        $clean_document = preg_replace('/[^0-9A-Z]/', '', strtoupper($document));
+        $is_cpf_document = strlen($clean_document) === 11;
+
+        // REASON: IE é obrigatória apenas para CNPJ. Se o documento é CPF,
+        // remove o required para o WC_Form_Handler::save_address não acusar
+        // "Inscrição Estadual (IE) é um campo obrigatório.".
+        if ($is_cpf_document) {
+            $fields['billing_ie']['required'] = false;
+        }
+
         return $fields;
     }
 
