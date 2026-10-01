@@ -6,6 +6,8 @@ $vendorDir = dirname(__DIR__);
 $baseDir = dirname($vendorDir);
 
 return array(
+    'libphonenumber\\' => array($vendorDir . '/giggsey/libphonenumber-for-php-lite/src'),
+    'Symfony\\Polyfill\\Mbstring\\' => array($vendorDir . '/symfony/polyfill-mbstring'),
     'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => array($baseDir . '/Public'),
     'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => array($baseDir . '/Includes'),
     'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' => array($baseDir . '/Admin'),

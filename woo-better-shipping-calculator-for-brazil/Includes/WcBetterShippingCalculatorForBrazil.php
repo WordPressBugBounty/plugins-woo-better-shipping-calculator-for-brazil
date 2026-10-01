@@ -7,10 +7,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 
-use Lkn\WcBetterShippingCalculatorForBrazil\Admin\partials\WcBetterShippingCalculatorForBrazilWcSettings;
 use Lkn\WcBetterShippingCalculatorForBrazil\Admin\partials\WcBetterShippingCalculatorForBrazilCheckoutSettings;
+use Lkn\WcBetterShippingCalculatorForBrazil\Admin\partials\WcBetterShippingCalculatorForBrazilShippingCalculatorSettings;
 use Lkn\WcBetterShippingCalculatorForBrazil\Admin\WcBetterShippingCalculatorForBrazilAdmin;
-use Lkn\WcBetterShippingCalculatorForBrazil\Admin\WcBetterShippingCalculatorForBrazilBetaNotice;
+use Lkn\WcBetterShippingCalculatorForBrazil\Admin\WcBetterShippingCalculatorForBrazilShippingMigration;
+use Lkn\WcBetterShippingCalculatorForBrazil\Admin\WcBetterShippingCalculatorForBrazilShippingCalculatorInstaller;
+use Lkn\WcBetterShippingCalculatorForBrazil\Admin\WcBetterShippingCalculatorForBrazilMigrationEmail;
 use Lkn\WcBetterShippingCalculatorForBrazil\PublicView\WcBetterShippingCalculatorForBrazilPublic;
 use Automattic\WooCommerce\StoreApi\Schemas\V1\CartItemSchema;
 use Automattic\WooCommerce\StoreApi\Schemas\V1\CartSchema;
@@ -73,29 +75,14 @@ class WcBetterShippingCalculatorForBrazil
     protected $version;
 
     /**
-     * Flag que indica se o filtro lkn_woo_better_control_rates está sendo chamado
-     * a partir do cálculo de frete de produto único (lkn_register_product_address).
-     * Quando true, o valor mínimo para frete grátis usa o contents_cost do pacote.
-     * Quando false (carrinho/checkout), usa o subtotal total do carrinho.
+     * Guarda de reentrância para os sync do campo de telefone. update_option() de
+     * uma das opções re-dispara os próprios hooks (ex.: update_option_woocommerce_
+     * checkout_phone_field), então a flag evita chamadas aninhadas que poderiam
+     * corromper o estado.
      *
-     * @since    4.16.0
-     * @access   private
-     * @var      bool
+     * @var bool
      */
-    private $is_product_address_calculation = false;
-
-    /**
-     * Flag que indica que o cálculo de frete está em andamento e que o filtro
-     * woocommerce_cart_get_cart deve remover produtos com frete grátis do array
-     * retornado por WC()->cart->get_cart(). Isso resolve a incompatibilidade com
-     * plugins como o Melhor Envio que leem o carrinho diretamente em vez de usar
-     * os pacotes filtrados via woocommerce_cart_shipping_packages.
-     *
-     * @since    4.16.0
-     * @access   private
-     * @var      bool
-     */
-    private $is_shipping_calculation_active = false;
+    protected static $phone_field_syncing = false;
 
     /**
      * Define the core functionality of the plugin.
@@ -111,7 +98,7 @@ class WcBetterShippingCalculatorForBrazil
         if (defined('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION')) {
             $this->version = WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION;
         } else {
-            $this->version = '4.17.6';
+            $this->version = '5.0.2';
         }
         $this->plugin_name = 'wc-better-shipping-calculator-for-brazil';
 
@@ -156,6 +143,42 @@ class WcBetterShippingCalculatorForBrazil
         $this->loader->add_action('admin_enqueue_scripts', $plugin_admin, 'enqueue_styles');
         $this->loader->add_action('admin_enqueue_scripts', $plugin_admin, 'enqueue_scripts');
 
+        // Aviso de migração dos recursos da "Calculadora de Frete" para o
+        // plugin "Shipping Simulator for WooCommerce" (exibido após a 4.17.1).
+        $shipping_migration = new WcBetterShippingCalculatorForBrazilShippingMigration();
+
+        $this->loader->add_action('admin_menu', $shipping_migration, 'register_admin_page');
+        $this->loader->add_action('admin_init', $shipping_migration, 'maybe_redirect');
+        $this->loader->add_action('admin_head', $shipping_migration, 'remove_admin_notices', 0);
+        $this->loader->add_action('admin_enqueue_scripts', $shipping_migration, 'enqueue_assets');
+        $this->loader->add_action('admin_notices', $shipping_migration, 'maybe_show_notice');
+        $this->loader->add_action('wp_ajax_' . WcBetterShippingCalculatorForBrazilShippingMigration::get_ajax_action(), $shipping_migration, 'dismiss_notice');
+
+        // Sugestão de instalação do Shipping Simulator para usuários novos
+        // (sem configuração antiga da calculadora de frete).
+        $this->loader->add_action('admin_notices', $shipping_migration, 'maybe_show_install_suggestion');
+        $this->loader->add_action('wp_ajax_woo_better_calc_dismiss_install_suggestion', $shipping_migration, 'dismiss_install_suggestion');
+
+        // Aviso de atualização do Shipping Simulator quando o woo-better já
+        // está atualizado e o shipping-simulator está desatualizado.
+        $this->loader->add_action('admin_notices', $shipping_migration, 'maybe_show_shipping_update_notice');
+        $this->loader->add_action('wp_ajax_woo_better_calc_dismiss_shipping_update', $shipping_migration, 'dismiss_shipping_update_notice');
+
+        // Rollback para a versão anterior (apenas beta-testers).
+        $this->loader->add_filter('plugin_action_links_' . WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_BASENAME, $shipping_migration, 'add_rollback_action_link', 11, 1);
+        $this->loader->add_action('admin_enqueue_scripts', $shipping_migration, 'enqueue_rollback_assets');
+        $this->loader->add_action('wp_ajax_woo_better_calc_rollback', $shipping_migration, 'rollback');
+
+        // Instala/atualiza/ativa o Shipping Simulator via AJAX (card "Calculadora de Frete").
+        $shipping_installer = new WcBetterShippingCalculatorForBrazilShippingCalculatorInstaller();
+        $this->loader->add_action('admin_enqueue_scripts', $shipping_installer, 'enqueue_assets');
+        $this->loader->add_action('wp_ajax_' . WcBetterShippingCalculatorForBrazilShippingCalculatorInstaller::AJAX_ACTION, $shipping_installer, 'handle');
+
+        // E-mail de aviso de migração (disparado via cron após detecção no init).
+        $migration_email = new WcBetterShippingCalculatorForBrazilMigrationEmail();
+        $this->loader->add_action('init', $migration_email, 'maybe_schedule_email');
+        $this->loader->add_action(WcBetterShippingCalculatorForBrazilMigrationEmail::CRON_HOOK, $migration_email, 'send_migration_email');
+
         // detect state from postcode
         $this->loader->add_filter('woocommerce_checkout_fields', $this, 'lkn_add_custom_checkout_field', 100, 1);
 
@@ -163,34 +186,11 @@ class WcBetterShippingCalculatorForBrazil
         // após todos os outros filtros terem sido aplicados
         $this->loader->add_filter('woocommerce_form_field_args', $this, 'lkn_adjust_address_placeholder', 999, 3);
 
-        $this->loader->add_action('rest_api_init', $this, 'lkn_register_custom_cep_route');
-
-        $this->loader->add_filter('woocommerce_get_settings_pages', $this, 'lkn_add_woo_better_settings_page');
         $this->loader->add_filter('woocommerce_get_settings_pages', $this, 'lkn_add_woo_better_checkout_settings_page');
 
         $this->loader->add_action('admin_footer', $this, 'lkn_woo_better_footer_page');
 
         $this->loader->add_filter('plugin_action_links_' . WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_BASENAME, $this, 'lkn_add_settings_link', 10, 2);
-
-        $disabled_shipping = get_option('woo_better_calc_disabled_shipping', 'default');
-
-        $this->loader->add_action('template_redirect', $this, 'lkn_set_country_brasil', 999);
-        $this->loader->add_action('template_redirect', $this, 'lkn_force_shipping_recalc', 5);
-
-        // Filtra produtos com frete grátis dos pacotes de cálculo de frete
-        $this->loader->add_filter('woocommerce_cart_shipping_packages', $this, 'lkn_filter_free_shipping_products_from_packages', 999, 1);
-
-        // Filtra produtos com frete grátis do retorno de WC()->cart->get_cart() durante o cálculo de frete.
-        // Isso resolve a incompatibilidade com plugins como o Melhor Envio, que leem o carrinho
-        // diretamente via CartWooCommerceService::getProducts() em vez de usar os pacotes filtrados.
-        $this->loader->add_filter('woocommerce_get_cart_contents', $this, 'lkn_filter_free_shipping_from_cart', 999, 1);
-
-        // Ativa a flag is_shipping_calculation_active ANTES do cálculo dos totais do carrinho,
-        // para que o filtro woocommerce_get_cart_contents possa remover produtos com frete grátis.
-        $this->loader->add_action('woocommerce_before_calculate_totals', $this, 'lkn_set_shipping_calculation_flag', 10, 1);
-
-        // Reseta a flag is_shipping_calculation_active após o cálculo dos totais do carrinho.
-        $this->loader->add_action('woocommerce_after_calculate_totals', $this, 'lkn_reset_shipping_calculation_flag', 10, 1);
 
         // O ajuste de placeholder do address_1 via locale deve sempre estar ativo,
         // pois o JS address-i18n.js sobrescreve o placeholder no cliente.
@@ -198,21 +198,8 @@ class WcBetterShippingCalculatorForBrazil
 
         $this->loader->add_filter('woocommerce_get_country_locale', $this, 'lkn_disable_company_required_based_on_person_type', 20, 1);
 
-        $this->loader->add_filter('woocommerce_cart_needs_shipping', $this, 'lkn_custom_disable_shipping', 10, 1);
-        $this->loader->add_filter('woocommerce_cart_needs_shipping_address', $this, 'lkn_custom_disable_shipping', 10, 1);
-
-        $this->loader->add_filter('woocommerce_package_rates', $this, 'lkn_woo_better_control_rates', 10, 2);
-
         $this->loader->add_action('admin_notices', $this, 'lkn_show_admin_notice');
         $this->loader->add_action('wp_ajax_woo_better_calc_dismiss_notice', $this, 'lkn_dismiss_admin_notice');
-        $this->loader->add_action('wp_ajax_woo_better_calc_update_cache_token', $this, 'lkn_update_cache_token');
-
-        // Aviso de lançamento da versão beta (instala a v5.0.0 a partir do GitHub).
-        $beta_notice = new WcBetterShippingCalculatorForBrazilBetaNotice();
-        $this->loader->add_action('admin_enqueue_scripts', $beta_notice, 'enqueue_assets');
-        $this->loader->add_action('admin_notices', $beta_notice, 'maybe_render_notice');
-        $this->loader->add_action('wp_ajax_woo_better_calc_dismiss_beta_notice', $beta_notice, 'dismiss_notice');
-        $this->loader->add_action('wp_ajax_woo_better_calc_install_beta', $beta_notice, 'install_beta');
 
         // Remover erros de validação de CPF/CNPJ quando país não é BR
         $this->loader->add_action('woocommerce_after_checkout_validation', $this, 'lkn_disabled_require_field', 10, 2);
@@ -230,15 +217,22 @@ class WcBetterShippingCalculatorForBrazil
         // (ex.: "Dinâmico" voltava para "Opcional").
         $this->loader->add_action('updated_option', $this, 'sync_company_field_on_option_update', 10, 3);
 
+        // Sincronização do campo de telefone (Celular/Telefone) com o nativo.
+        // ATENÇÃO ao nome dos hooks dinâmicos do WP: são "add_option_{$option}" e
+        // "update_option_{$option}" (sem o "d" de "updated_option").
+        //
+        // Visibilidade (hidden x visível) ← "Destaque do Campo Telefone".
+        $this->loader->add_action('add_option_woo_better_calc_contact_field_position', $this, 'sync_phone_field', 10, 0);
+        $this->loader->add_action('update_option_woo_better_calc_contact_field_position', $this, 'sync_phone_field', 10, 0);
+        // Obrigatoriedade (optional x required) ← "Telefone (Contato) Obrigatório".
+        $this->loader->add_action('update_option_woo_better_calc_contact_required', $this, 'sync_native_from_contact_required', 10, 0);
+        // Ida e volta a partir do editor do checkout em blocos (toggle/radio do telefone).
+        $this->loader->add_action('update_option_woocommerce_checkout_phone_field', $this, 'sync_contact_required_from_native', 10, 3);
+        // Migração para instalações existentes: cria a opção (default 'yes') se ainda não existir.
+        $this->loader->add_action('init', $this, 'ensure_phone_field_option', 10, 0);
+
         // Hook para adicionar campos customizados na resposta AJAX de detalhes do cliente (admin)
         $this->loader->add_filter('woocommerce_ajax_get_customer_details', $this, 'add_custom_fields_to_customer_details', 10, 3);
-
-        // Hook para adicionar checkbox de frete grátis na aba de entrega do produto
-        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
-        if ($enable_free_shipping_by_product === 'yes') {
-            $this->loader->add_action('woocommerce_product_options_shipping', $this, 'lkn_add_free_shipping_product_checkbox');
-            $this->loader->add_action('woocommerce_process_product_meta', $this, 'lkn_save_free_shipping_product_checkbox');
-        }
 
         /**
          * Integração com FunnelKit Checkout: classe stub para compatibilidade
@@ -252,10 +246,26 @@ class WcBetterShippingCalculatorForBrazil
         $this->loader->add_action('wp_loaded', $this, 'register_funnelkit_stub_class', PHP_INT_MAX);
     }
 
+    /**
+     * Verifica se a página admin atual é de atualização/instalação de plugins.
+     *
+     * @return bool
+     */
+    private function is_plugin_update_page()
+    {
+        $pagenow = isset($GLOBALS['pagenow']) ? $GLOBALS['pagenow'] : '';
+        return in_array($pagenow, array('update.php', 'update-core.php', 'update-core-network.php'), true);
+    }
+
     public function lkn_show_admin_notice()
     {
         // Verifica se é a área admin
         if (!is_admin()) {
+            return;
+        }
+
+        // Não exibe notificações na página de atualização/instalação de plugins.
+        if ($this->is_plugin_update_page()) {
             return;
         }
 
@@ -275,8 +285,7 @@ class WcBetterShippingCalculatorForBrazil
         $notice_dismissed = get_user_meta(get_current_user_id(), $notice_key, true);
 
         if ($notice_dismissed || (isset($_GET['tab']) && 
-            ('wc-better-calc' === sanitize_text_field(wp_unslash($_GET['tab'])) || 
-             'wc-better-calc-checkout' === sanitize_text_field(wp_unslash($_GET['tab']))))) {
+            'wc-better-calc-checkout' === sanitize_text_field(wp_unslash($_GET['tab'])))) {
             return;
         }
 
@@ -288,7 +297,7 @@ class WcBetterShippingCalculatorForBrazil
             $is_new_install = false;
         } else {
             // Prioridade 2: verifica se dispensou notice de alguma das últimas versões
-            $old_versions   = array( '4.17.5', '4.17.4', '4.17.3', '4.17.2', '4.17.1', '4.17.0', '4.16.12', '4.16.11', '4.16.10', '4.16.9', '4.16.8', '4.16.7', '4.16.6', '4.16.5' );
+            $old_versions   = array( '5.0.1', '5.0.0', '4.17.4', '4.17.3', '4.17.2', '4.17.1', '4.17.0', '4.16.12', '4.16.11', '4.16.10', '4.16.9', '4.16.8', '4.16.7', '4.16.6' );
             $is_new_install = true;
             foreach ( $old_versions as $old_version ) {
                 if ( get_user_meta( get_current_user_id(), 'woo_better_calc_notice_dismissed_' . $old_version, true ) ) {
@@ -303,22 +312,19 @@ class WcBetterShippingCalculatorForBrazil
             ?>
             <div class="notice notice-info is-dismissible" data-dismissible="woo-better-calc-notice">
                 <div style="height: 100%; padding: 10px;">
-                    <strong style="font-size: 18px;">🚀 Calculadora de Frete e Campos Checkout para o Brasil</strong>
+                    <strong style="font-size: 18px;">🚀 <?php esc_html_e('Campos Checkout Brasileiro para WooCommerce', 'woo-better-shipping-calculator-for-brazil'); ?></strong>
                     
                     <p style="font-size: 14px; margin-top: 10px;">
                         <strong>Agora é oficial:</strong> somos a melhor alternativa ao "Brazilian Fields"! Nossos campos de checkout agora são compatíveis com shortcodes e temas em blocos, com integração total ao Melhor Envio, Correios, entre outros.
                     </p>
                     
                     <p style="font-size: 14px;">
-                        Aproveite também o novo recurso de frete grátis por valor, agora integrado aos métodos de entrega do WooCommerce. Precisa de Suporte WordPress? Entre no Grupo do <a href="https://chat.whatsapp.com/IjzHhDXwmzGLDnBfOibJKO" target="_blank" rel="noopener noreferrer">WhatsApp</a> ou <a href="https://t.me/wpprobr" target="_blank" rel="noopener noreferrer">Telegram</a>.
+                        Aproveite também o novo recurso de frete grátis por valor, agora integrado aos métodos de entrega do WooCommerce. Precisa de Suporte WordPress? Entre no Grupo do <a href="https://chat.whatsapp.com/C6S3my9Adr818hbeJphPBm" target="_blank" rel="noopener noreferrer">WhatsApp</a> ou <a href="https://t.me/wpprobr" target="_blank" rel="noopener noreferrer">Telegram</a>.
                     </p>
 
                     <div style="display: flex; gap: 12px; margin-top: 15px; flex-wrap: wrap;">
                         <a href="admin.php?page=wc-settings&tab=wc-better-calc-checkout" class="button button-primary" style="display: flex; align-items: center; justify-content: center;">
                             Configurar campos do Brasil
-                        </a>
-                        <a href="admin.php?page=wc-settings&tab=wc-better-calc" class="button button-secondary" style="display: flex; align-items: center; justify-content: center;">
-                            Configurar Calculadora de Frete
                         </a>
                     </div>
                 </div>
@@ -334,7 +340,11 @@ class WcBetterShippingCalculatorForBrazil
             ?>
             <div class="notice notice-info is-dismissible" data-dismissible="woo-better-calc-notice">
                 <div style="height: 100%; padding: 10px;">
-                    <strong style="font-size: 18px;">🚀 Calculadora de Frete e Campos Checkout para o Brasil — Atualização v<?php echo esc_html( $version ); ?></strong>
+                    <strong style="font-size: 18px;">🚀 <?php echo esc_html( sprintf(
+                        /* translators: %s: versão do plugin */
+                        __( 'Campos Checkout Brasileiro para WooCommerce — Atualização v%s', 'woo-better-shipping-calculator-for-brazil' ),
+                        $version
+                    ) ); ?></strong>
 
                     <div style="margin-top: 10px;">
                         <p style="font-size: 14px; margin-top: 8px;">
@@ -345,9 +355,6 @@ class WcBetterShippingCalculatorForBrazil
                     <div style="display: flex; gap: 12px; margin-top: 15px; flex-wrap: wrap;">
                         <a href="admin.php?page=wc-settings&tab=wc-better-calc-checkout" class="button button-primary" style="display: flex; align-items: center; justify-content: center;">
                             Configurar campos do Brasil
-                        </a>
-                        <a href="admin.php?page=wc-settings&tab=wc-better-calc" class="button button-secondary" style="display: flex; align-items: center; justify-content: center;">
-                            Configurar Calculadora de Frete
                         </a>
                     </div>
                 </div>
@@ -379,463 +386,6 @@ class WcBetterShippingCalculatorForBrazil
         wp_send_json_success();
     }
 
-    /**
-     * AJAX handler para atualizar o token de cache
-     */
-    public function lkn_update_cache_token()
-    {
-        // Verifica permissões (compatível com multisite)
-        if (!$this->user_can_manage_multisite_options()) {
-            wp_send_json_error('Unauthorized', 403);
-        }
-
-        // Verifica nonce se fornecido
-        if (isset($_POST['nonce']) && !empty($_POST['nonce'])) {
-            $nonce = sanitize_text_field(wp_unslash($_POST['nonce']));
-            if (!wp_verify_nonce($nonce, 'woo_better_calc_update_cache_token')) {
-                wp_send_json_error('Nonce inválido', 403);
-            }
-        }
-
-        // Verifica se o token foi enviado
-        if (!isset($_POST['token']) || empty($_POST['token'])) {
-            wp_send_json_error('Token é obrigatório', 400);
-        }
-
-        $new_token = sanitize_text_field(wp_unslash($_POST['token']));
-
-        // Valida o formato do token (WCBCB_ + 19 caracteres alfanuméricos)
-        if (!preg_match('/^WCBCB_[A-Z0-9]{19}$/', $new_token)) {
-            wp_send_json_error('Token inválido. Formato esperado: WCBCB_XXXXXXXXXXXXXXXXXXX', 400);
-        }
-
-        // Atualiza a opção no banco de dados
-        $updated = update_option('woo_better_calc_enable_auto_cache_reset', $new_token);
-
-        if ($updated) {
-            wp_send_json_success(array(
-                'message' => 'Token de cache atualizado com sucesso',
-                'token' => $new_token
-            ));
-        } else {
-            wp_send_json_error('Erro ao atualizar o token no banco de dados', 500);
-        }
-    }
-
-    /**
-     * Adiciona checkbox de frete grátis na aba de entrega do produto (admin).
-     *
-     * @return void
-     */
-    public function lkn_add_free_shipping_product_checkbox()
-    {
-        woocommerce_wp_checkbox(array(
-            'id'            => '_wc_better_free_shipping',
-            'label'         => __('Frete Grátis para este Produto', 'woo-better-shipping-calculator-for-brazil'),
-            'description'   => __('Ativa o frete grátis exclusivamente para este item. Se o cliente adicionar este produto junto com outros que possuem frete pago no carrinho, o cálculo do frete ignorará este item e cobrará apenas o valor de envio dos demais produtos.', 'woo-better-shipping-calculator-for-brazil'),
-            'desc_tip'      => true,
-        ));
-    }
-
-    /**
-     * Salva o valor do checkbox de frete grátis por produto.
-     *
-     * @param int $post_id ID do produto.
-     * @return void
-     */
-    public function lkn_save_free_shipping_product_checkbox($post_id)
-    {
-        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
-        if ($enable_free_shipping_by_product !== 'yes') {
-            return;
-        }
-
-        $free_shipping = isset($_POST['_wc_better_free_shipping']) ? 'yes' : 'no';
-        update_post_meta($post_id, '_wc_better_free_shipping', $free_shipping);
-    }
-
-    /**
-     * Filtra produtos com frete grátis (_wc_better_free_shipping) dos pacotes de cálculo de frete.
-     *
-     * Quando um produto tem a flag _wc_better_free_shipping = 'yes', ele é removido do pacote
-     * de cálculo para que os plugins de frete (Correios, Melhor Envio, etc.) não o considerem
-     * no cálculo do valor de envio. Apenas os produtos SEM frete grátis terão frete calculado.
-     *
-     * Caso TODOS os produtos do carrinho tenham frete grátis, mantém o pacote intacto para que
-     * o WooCommerce possa aplicar a lógica de frete grátis total posteriormente.
-     *
-     * @param array $packages Pacotes de envio a serem calculados.
-     * @return array Pacotes de envio modificados, sem os produtos com frete grátis.
-     * @since 4.16.0
-     */
-    public function lkn_filter_free_shipping_products_from_packages($packages)
-    {
-        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
-
-        // Só aplica o filtro se a funcionalidade de frete grátis por produto estiver habilitada
-        if ($enable_free_shipping_by_product !== 'yes') {
-            return $packages;
-        }
-
-        // Verifica se o contexto do WooCommerce é válido
-        if (!$this->is_valid_woocommerce_context() || !isset(WC()->cart)) {
-            return $packages;
-        }
-
-        foreach ($packages as $package_key => $package) {
-            if (!isset($package['contents']) || !is_array($package['contents'])) {
-                continue;
-            }
-
-            $free_shipping_items = array();
-            $paid_shipping_items = array();
-
-            // Separa os itens entre frete grátis e frete pago
-            foreach ($package['contents'] as $item_key => $item) {
-                $product_id = isset($item['product_id']) ? $item['product_id'] : 0;
-                $product_free_shipping = get_post_meta($product_id, '_wc_better_free_shipping', true);
-
-                if ($product_free_shipping === 'yes') {
-                    $free_shipping_items[$item_key] = $item;
-                } else {
-                    $paid_shipping_items[$item_key] = $item;
-                }
-            }
-
-            // Se há itens com frete grátis E itens com frete pago, remove os itens com frete grátis
-            // para que os plugins de frete calculem apenas com base nos itens com frete pago
-            if (!empty($free_shipping_items) && !empty($paid_shipping_items)) {
-                $packages[$package_key]['contents'] = $paid_shipping_items;
-
-                // Recalcula o custo do conteúdo do pacote apenas com os itens pagos
-                $new_contents_cost = 0;
-                foreach ($paid_shipping_items as $item) {
-                    $new_contents_cost += floatval(isset($item['line_total']) ? $item['line_total'] : $item['line_subtotal']);
-                }
-                $packages[$package_key]['contents_cost'] = $new_contents_cost;
-            }
-            // Se todos os itens têm frete grátis, mantém o pacote intacto
-            // (a lógica de frete grátis total é tratada em lkn_woo_better_control_rates)
-        }
-
-        return $packages;
-    }
-
-    /**
-     * Filtra produtos com frete grátis do retorno de WC()->cart->get_cart().
-     *
-     * Devido ao comportamento do plugin do Melhor Envio, que obtém os produtos
-     * diretamente do carrinho via CartWooCommerceService::getProducts() (que chama
-     * $woocommerce->cart->get_cart()), ignorando os pacotes já filtrados pelo hook
-     * woocommerce_cart_shipping_packages, este filtro remove os produtos com frete
-     * grátis da resposta de get_cart() quando um cálculo de frete está em andamento.
-     *
-     * @param array $cart_contents Conteúdo do carrinho.
-     * @return array Conteúdo do carrinho sem produtos com frete grátis (quando aplicável).
-     * @since 4.16.0
-     */
-    public function lkn_filter_free_shipping_from_cart($cart_contents)
-    {
-        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
-
-        if ($enable_free_shipping_by_product !== 'yes') {
-            return $cart_contents;
-        }
-
-        if (!$this->is_shipping_calculation_active) {
-            return $cart_contents;
-        }
-
-        if (!$this->is_valid_woocommerce_context() || !isset(WC()->cart)) {
-            return $cart_contents;
-        }
-
-        $free_shipping_items = array();
-        $paid_shipping_items = array();
-
-        foreach ($cart_contents as $item_key => $item) {
-            $product_id = isset($item['product_id']) ? $item['product_id'] : 0;
-            $product_free_shipping = get_post_meta($product_id, '_wc_better_free_shipping', true);
-
-            if ($product_free_shipping === 'yes') {
-                $free_shipping_items[$item_key] = $item;
-            } else {
-                $paid_shipping_items[$item_key] = $item;
-            }
-        }
-
-        // Se há itens com frete grátis E itens com frete pago, retorna apenas os pagos
-        // Se todos são frete grátis ou todos são pagos, retorna o carrinho intacto
-        if (!empty($free_shipping_items) && !empty($paid_shipping_items)) {
-            return $paid_shipping_items;
-        }
-
-        return $cart_contents;
-    }
-
-    /**
-     * Força a limpeza do cache de sessão de frete em páginas de carrinho/checkout.
-     * O WooCommerce salva as taxas na sessão (shipping_for_package_X) e as reutiliza
-     * sem disparar o filtro woocommerce_package_rates. Isso impede que nosso frete
-     * grátis seja injetado quando as taxas estão cacheadas.
-     *
-     * @since 4.18.0
-     * @return void
-     */
-    public function lkn_force_shipping_recalc()
-    {
-        if (is_cart() || is_checkout()) {
-            if (WC()->session) {
-                for ($i = 0; $i < 10; $i++) {
-                    WC()->session->__unset('shipping_for_package_' . $i);
-                }
-            }
-        }
-    }
-
-    /**
-     * Hook que roda DEPOIS do calculate_totals.
-     * No modo calc_base=total, o primeiro passe do woocommerce_package_rates
-     * não tem acesso a fees/descontos (eles ainda não foram calculados).
-     * Este método verifica se o total (agora completo) atinge o valor mínimo
-     * e força um segundo calculate_totals com a flag ativada para injetar
-     * o frete grátis.
-     *
-     * @since 4.18.0
-     * @param WC_Cart $cart O carrinho do WooCommerce.
-     * @return void
-     */
-    /**
-     * @deprecated 5.0.0 Two-pass removido. Cálculo agora é feito diretamente
-     *             no woocommerce_package_rates via get_subtotal() - get_discount_total().
-     */
-    public function lkn_after_calculate_totals_free_shipping($cart)
-    {
-        return;
-    }
-
-    /**
-     * Ativa a flag is_shipping_calculation_active antes do cálculo dos totais.
-     *
-     * @param WC_Cart $cart O carrinho do WooCommerce.
-     * @return void
-     * @since 4.16.0
-     */
-    public function lkn_set_shipping_calculation_flag($cart)
-    {
-        $this->is_shipping_calculation_active = true;
-
-        // Limpa o cache de sessão das taxas de envio para forçar o WooCommerce
-        // a recalcular e disparar o filtro woocommerce_package_rates.
-        // Sem isso, taxas cacheadas na sessão pulam completamente nosso filtro.
-        if (WC()->session) {
-            for ($i = 0; $i < 10; $i++) {
-                WC()->session->__unset('shipping_for_package_' . $i);
-            }
-        }
-    }
-
-    /**
-     * Reseta a flag is_shipping_calculation_active após o cálculo dos totais.
-     *
-     * @param WC_Cart $cart O carrinho do WooCommerce.
-     * @return void
-     * @since 4.16.0
-     */
-    public function lkn_reset_shipping_calculation_flag($cart)
-    {
-        $this->is_shipping_calculation_active = false;
-    }
-
-    public function lkn_woo_better_control_rates($rates, $package)
-    {
-        $enable_free_shipping_by_product = get_option('woo_better_enable_free_shipping_by_product', 'no');
-        $enable_min = get_option('woo_better_enable_min_free_shipping', 'no');
-        $min_value = floatval(get_option('woo_better_min_free_shipping_value', 0));
-        $calc_base = get_option('woo_better_free_shipping_calc_base', 'subtotal');
-        $only_free_shipping = get_option('woo_better_only_free_shipping', 'yes');
-        $avoid_free_shipping_duplication = get_option('woo_better_avoid_free_shipping_duplication', 'no');
-
-        if ($this->is_playground_environment()) {
-            $rates = [];
-            $rate = new \WC_Shipping_Rate(
-                'simulado_playground',
-                'Frete Simulado (Playground)',
-                12.34,
-                [],
-                'simulado_playground'
-            );
-            $rates['simulado_playground'] = $rate;
-        }
-
-        // Verifica se já existe um frete grátis vindo do WooCommerce nativamente
-        $has_free_shipping = false;
-        if ($avoid_free_shipping_duplication === 'yes') {
-            foreach ($rates as $rate) {
-                if (isset($rate) && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
-                    $has_free_shipping = true;
-                    break;
-                }
-            }
-        }
-
-        // ── PRIORIDADE 1: Frete Grátis por Valor Mínimo do Carrinho ─────────
-        // Tem prioridade sobre o frete por produto quando o valor mínimo é atingido
-        if ($enable_min === 'yes' && ! $has_free_shipping) {
-            if ($this->is_product_address_calculation) {
-                $cart_total = isset($package['contents_cost']) ? floatval($package['contents_cost']) : 0;
-            } else {
-                if ($calc_base === 'total') {
-                    // REASON: Base de cálculo = subtotal - cupons de desconto.
-                    // Juros/fees de gateway não entram na conta.
-                    $cart_total = (float) WC()->cart->get_subtotal()
-                        - (float) WC()->cart->get_discount_total();
-                } else {
-                    $cart_total = WC()->cart->get_displayed_subtotal();
-                }
-            }
-            if ($cart_total >= $min_value) {
-                $min_free_shipping_label = __('Frete Gratuito (Valor mínimo)', 'woo-better-shipping-calculator-for-brazil');
-                $min_delivery_time = get_option('woo_better_min_free_shipping_delivery_time', '');
-                if (!empty($min_delivery_time)) {
-                    $min_free_shipping_label .= ' (' . $min_delivery_time . ')';
-                }
-
-                $has_free_shipping = true; // Marca que já temos frete grátis (evita que o frete por produto seja adicionado)
-                $free_shipping_rate = new \WC_Shipping_Rate(
-                    'free_shipping_min',
-                    $min_free_shipping_label,
-                    0,
-                    array(),
-                    'free_shipping'
-                );
-                if ($only_free_shipping === 'yes') {
-                    // Mantém apenas fretes gratuitos (cost == 0) e adiciona o nosso
-                    $new_rates = array('free_shipping_min' => $free_shipping_rate);
-                    foreach ($rates as $key => $rate) {
-                        if ($key !== 'free_shipping_min' && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
-                            $new_rates[$key] = $rate;
-                        }
-                    }
-                    $rates = $new_rates;
-                    return $rates;
-                } else {
-                    $new_rates = array('free_shipping_min' => $free_shipping_rate);
-                    foreach ($rates as $key => $rate) {
-                        if ($key !== 'free_shipping_min') {
-                            $new_rates[$key] = $rate;
-                        }
-                    }
-                    $rates = $new_rates;
-                }
-            }
-        }
-
-        // ── PRIORIDADE 2: Frete Grátis por Produto ──────────────────────────
-        // Só aplica se não houver frete grátis nativo ou por valor mínimo (quando evitar duplicação ativo)
-        if ($enable_free_shipping_by_product === 'yes' && ! $has_free_shipping) {
-            $all_products_free_shipping = true;
-            if ($this->is_valid_woocommerce_context() && isset(WC()->cart)) {
-                foreach (WC()->cart->get_cart() as $cart_item) {
-                    $product_id = $cart_item['product_id'];
-                    $product_free_shipping = get_post_meta($product_id, '_wc_better_free_shipping', true);
-                    if ($product_free_shipping !== 'yes') {
-                        $all_products_free_shipping = false;
-                        break;
-                    }
-                }
-            } else {
-                $all_products_free_shipping = false;
-            }
-
-            if ($all_products_free_shipping) {
-                $product_free_shipping_label = __('Frete Grátis (Produto)', 'woo-better-shipping-calculator-for-brazil');
-                $product_delivery_time = get_option('woo_better_free_shipping_by_product_delivery_time', '');
-                if (!empty($product_delivery_time)) {
-                    $product_free_shipping_label .= ' (' . $product_delivery_time . ')';
-                }
-
-                $free_shipping_rate = new \WC_Shipping_Rate(
-                    'free_shipping_product',
-                    $product_free_shipping_label,
-                    0,
-                    array(),
-                    'free_shipping'
-                );
-                if ($only_free_shipping === 'yes') {
-                    // Mantém apenas fretes gratuitos (cost == 0) e adiciona o nosso
-                    $new_rates = array('free_shipping_product' => $free_shipping_rate);
-                    foreach ($rates as $key => $rate) {
-                        if ($key !== 'free_shipping_product' && method_exists($rate, 'get_cost') && floatval($rate->get_cost()) == 0) {
-                            $new_rates[$key] = $rate;
-                        }
-                    }
-                    $rates = $new_rates;
-                    return $rates;
-                } else {
-                    $new_rates = array('free_shipping_product' => $free_shipping_rate);
-                    foreach ($rates as $key => $rate) {
-                        if ($key !== 'free_shipping_product') {
-                            $new_rates[$key] = $rate;
-                        }
-                    }
-                    $rates = $new_rates;
-                }
-            }
-        }
-
-        return $rates;
-    }
-
-    public function lkn_custom_disable_shipping($needs_shipping)
-    {
-        $disable_shipping_option = get_option('woo_better_calc_disabled_shipping', 'default');
-
-        $only_virtual = false;
-        if ($this->is_valid_woocommerce_context() && isset(WC()->cart)) {
-            foreach (WC()->cart->get_cart() as $cart_item) {
-                $product = $cart_item['data'];
-                if ($product->is_virtual() || $product->is_downloadable()) {
-                    $only_virtual = true;
-                } else {
-                    $only_virtual = false;
-                    break;
-                }
-            }
-        }
-
-        if ($disable_shipping_option === 'all' || ($only_virtual && $disable_shipping_option === 'digital')) {
-            return false;
-        }
-
-        // Se todos forem virtuais, não precisa de frete
-        if ($only_virtual) {
-            return false;
-        }
-
-        // REASON: Preserva a decisão nativa do WooCommerce quando o plugin não desabilita
-        // o frete. Retornar `true` incondicional aqui sobrescrevia o filtro
-        // woocommerce_cart_needs_shipping_address e fazia o checkout clássico exibir o
-        // checkbox "Entregar em um endereço diferente?" mesmo com a opção
-        // "Forçar entrega para o endereço de cobrança" (woocommerce_ship_to_destination=billing_only).
-        return $needs_shipping;
-    }
-
-    public function lkn_set_country_brasil()
-    {
-        if (!$this->is_valid_woocommerce_context()) {
-            return;
-        }
-
-        $customer = WC()->customer;
-
-        // Verificar se o cliente está definido
-        if (is_a($customer, 'WC_Customer')) {
-            // Funcionalidade legacy de campos ocultos removida
-            // Funcionalidade legacy de campos ocultos removida
-        }
-    }
-
     public function lkn_woo_better_shipping_calculator_locale($locale)
     {
         // Quando o campo de número está habilitado, ajusta o placeholder do address_1
@@ -850,60 +400,6 @@ class WcBetterShippingCalculatorForBrazil
                 $locale['BR']['address_1'] = array();
             }
             $locale['BR']['address_1']['placeholder'] = __('Nome da rua', 'woo-better-shipping-calculator-for-brazil');
-        }
-
-        // Ocultar campos de endereço via locale.
-        // ATENÇÃO: Desde WooCommerce >= 10.8, o locale afeta AMBOS os formulários
-        // (blocos e clássico). Por isso a guarda has_block() é obrigatória para
-        // não esconder campos indevidamente no checkout clássico.
-        $is_blocks_checkout = false;
-        if ( function_exists( 'has_block' ) ) {
-            global $post;
-            if ( isset( $post ) && is_a( $post, 'WP_Post' ) ) {
-                $is_blocks_checkout = has_block( 'woocommerce/checkout', $post );
-            }
-        }
-
-        // REASON: Em contexto REST API (Store API do WooCommerce Blocks), $post
-        // não está disponível e has_block() retorna false. Como a Store API só
-        // existe no checkout em blocos, assumimos is_blocks_checkout=true nesse
-        // caso para aplicar hidden=true/required=false e evitar erro de validação:
-        // "Endereço é obrigatório, Cidade é obrigatório, Estado é obrigatório, CEP é obrigatório".
-        $is_rest_blocks_context = defined( 'REST_REQUEST' ) && REST_REQUEST;
-
-        if ( ! $is_blocks_checkout && ! $is_rest_blocks_context ) {
-            return $locale;
-        }
-
-        $disabled_shipping = get_option('woo_better_calc_disabled_shipping', 'default');
-        $only_virtual = false;
-        if ($this->is_valid_woocommerce_context() && isset(WC()->cart)) {
-            foreach (WC()->cart->get_cart() as $cart_item) {
-                $product = $cart_item['data'];
-                if ($product->is_virtual() || $product->is_downloadable()) {
-                    $only_virtual = true;
-                } else {
-                    $only_virtual = false;
-                    break;
-                }
-            }
-        }
-
-        if ($disabled_shipping === 'all' ||  ($only_virtual && $disabled_shipping === 'digital')) {
-            $locale['BR']['postcode']['required'] = false;
-            $locale['BR']['postcode']['hidden'] = true;
-
-            $locale['BR']['city']['required'] = false;
-            $locale['BR']['city']['hidden'] = true;
-
-            $locale['BR']['state']['required'] = false;
-            $locale['BR']['state']['hidden'] = true;
-
-            $locale['BR']['address_1']['required'] = false;
-            $locale['BR']['address_1']['hidden'] = true;
-
-            $locale['BR']['address_2']['required'] = false;
-            $locale['BR']['address_2']['hidden'] = true;
         }
 
         return $locale;
@@ -946,12 +442,11 @@ class WcBetterShippingCalculatorForBrazil
 
     public function lkn_woo_better_footer_page()
     {
-        // Verifica se estamos na página e na aba correta (incluindo a nova aba de checkout)
+        // Verifica se estamos na página da aba de checkout
         if (
             isset($_GET['page'], $_GET['tab']) &&
             sanitize_text_field(wp_unslash($_GET['page'])) === 'wc-settings' &&
-            (sanitize_text_field(wp_unslash($_GET['tab'])) === 'wc-better-calc' || 
-             sanitize_text_field(wp_unslash($_GET['tab'])) === 'wc-better-calc-checkout')
+            sanitize_text_field(wp_unslash($_GET['tab'])) === 'wc-better-calc-checkout'
         ) {
             wp_enqueue_script(
                 'wc-better-calc-settings-layout',
@@ -963,46 +458,11 @@ class WcBetterShippingCalculatorForBrazil
 
             $plugin_path = 'invoice-payment-for-woocommerce/wc-invoice-payment.php';
             $invoice_plugin_installed = file_exists(WP_PLUGIN_DIR . '/' . $plugin_path);
-            $font_source = get_option('woo_better_calc_font_source', 'yes');
-            $font_class = 'woo-better-poppins-family';
 
-            if($font_source === 'no'){
-                $font_class = 'woo-better-inherit-family';
-            } 
-
-            // Adiciona ajaxurl para requisições AJAX
             wp_localize_script('wc-better-calc-settings-layout', 'wcBetterCalcAjax', array(
-                'ajaxurl' => admin_url('admin-ajax.php'),
-                'nonce' => wp_create_nonce('woo_better_calc_admin_nonce'),
                 'install_nonce' => wp_create_nonce('install-plugin_invoice-payment-for-woocommerce'),
                 'plugin_slug' => 'invoice-payment-for-woocommerce',
                 'invoice_plugin_installed' => $invoice_plugin_installed,
-                'font_class' => $font_class
-            ));
-
-            $icons = array(
-                'bill' => plugin_dir_url(__FILE__) . 'assets/icons/postcodeOptions/bill.svg',
-                'postcode' => plugin_dir_url(__FILE__) . 'assets/icons/postcodeOptions/postcode.svg',
-                'transit' => plugin_dir_url(__FILE__) . 'assets/icons/postcodeOptions/transit.svg',
-                'zipcode' => plugin_dir_url(__FILE__) . 'assets/icons/postcodeOptions/zipcode.svg',
-                'truck' => plugin_dir_url(__FILE__) . 'assets/icons/postcodeOptions/truck.svg',
-                'consult' => plugin_dir_url(__FILE__) . 'assets/icons/postcodeOptions/textFieldConsult.svg',
-            );
-
-            // Passa os dados para o JavaScript
-            wp_localize_script('wc-better-calc-settings-layout', 'WCBetterCalcIcons', $icons);
-
-            wp_localize_script('wc-better-calc-settings-layout', 'WCBetterCalcBarImages', array(
-                'with_label' => plugin_dir_url(__FILE__) . 'assets/images/barWithLabel.png',
-                'without_label' => plugin_dir_url(__FILE__) . 'assets/images/barWithoutLabel.png',
-            ));
-
-            // Verifica a versão do WooCommerce
-            $woo_version_valid = version_compare(WC_VERSION, '10.0.0', '>=') ? 'valid' : 'invalid';
-
-            // Passa os dados para o JavaScript
-            wp_localize_script('wc-better-calc-settings-layout', 'WCBetterCalcWooVersion', array(
-                'status' => $woo_version_valid,
             ));
 
             wp_enqueue_script(
@@ -1016,14 +476,6 @@ class WcBetterShippingCalculatorForBrazil
             wp_enqueue_style(
                 'wc-better-calc-style-settings',
                 WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Admin/cssCompiled/WcBetterShippingCalculatorForBrazilAdminSettings.COMPILED.css',
-                array(),
-                WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION,
-                'all'
-            );
-
-            wp_enqueue_style(
-                'wc-better-calc-style-postcode',
-                WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Admin/cssCompiled/WcBetterShippingCalculatorForBrazilAdminCustomPostcode.COMPILED.css',
                 array(),
                 WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION,
                 'all'
@@ -1062,7 +514,7 @@ class WcBetterShippingCalculatorForBrazil
 
     public function lkn_add_settings_link($links)
     {
-        $url = esc_url(admin_url('admin.php?page=wc-settings&tab=wc-better-calc'));
+        $url = esc_url(admin_url('admin.php?page=wc-settings&tab=wc-better-calc-checkout'));
 
         $settings_link = sprintf(
             '<a href="%s">%s</a>',
@@ -1075,14 +527,10 @@ class WcBetterShippingCalculatorForBrazil
     }
 
 
-    public function lkn_add_woo_better_settings_page($settings)
-    {
-        $settings[] = new WcBetterShippingCalculatorForBrazilWcSettings();
-        return $settings;
-    }
-
     public function lkn_add_woo_better_checkout_settings_page($settings)
     {
+        // Aba "Calculadora de Frete" deve vir antes de "Campos Brasileiros".
+        $settings[] = new WcBetterShippingCalculatorForBrazilShippingCalculatorSettings();
         $settings[] = new WcBetterShippingCalculatorForBrazilCheckoutSettings();
         return $settings;
     }
@@ -1090,24 +538,8 @@ class WcBetterShippingCalculatorForBrazil
     public function lkn_add_custom_checkout_field($fields)
     {
         $number_field = get_option('woo_better_calc_number_required', 'no');
-        $disabled_shipping = get_option('woo_better_calc_disabled_shipping', 'default');
 
-        $only_virtual = false;
-        if (function_exists('WC')) {
-            if (isset(WC()->cart)) {
-                foreach (WC()->cart->get_cart() as $cart_item) {
-                    $product = $cart_item['data'];
-                    if ($product->is_virtual() || $product->is_downloadable()) {
-                        $only_virtual = true;
-                    } else {
-                        $only_virtual = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if ($number_field === 'yes' && ($disabled_shipping === 'default' || !$only_virtual && $disabled_shipping === 'digital')) {
+        if ($number_field === 'yes') {
             // Adiciona um novo campo dentro do endereço de cobrança
             $fields['billing']['billing_number'] = array(
                 'label'       => __('Número', 'woo-better-shipping-calculator-for-brazil'),
@@ -1160,39 +592,6 @@ class WcBetterShippingCalculatorForBrazil
             );
         }
 
-        if ($disabled_shipping === 'all' || ($only_virtual && $disabled_shipping === 'digital')) {
-
-            unset($fields['billing']['billing_state']);
-            unset($fields['shipping']['shipping_state']);
-
-            // Desabilita validação de CEP e torna não obrigatório
-            $fields['billing']['billing_postcode']['validate'] = array();
-            $fields['billing']['billing_postcode']['required'] = false;
-
-            $fields['shipping']['shipping_postcode']['validate'] = array();
-            $fields['shipping']['shipping_postcode']['required'] = false;
-
-            $fields['billing']['billing_country'] = [
-                'type'     => 'hidden',
-                'default'  => 'BR'
-            ];
-            $fields['shipping']['shipping_country'] = [
-                'type'     => 'hidden',
-                'default'  => 'BR'
-            ];
-
-            // Remove os outros campos visuais
-            unset($fields['billing']['billing_postcode']);
-            unset($fields['billing']['billing_address_1']);
-            unset($fields['billing']['billing_address_2']);
-            unset($fields['billing']['billing_city']);
-
-            unset($fields['shipping']['shipping_postcode']);
-            unset($fields['shipping']['shipping_address_1']);
-            unset($fields['shipping']['shipping_address_2']);
-            unset($fields['shipping']['shipping_city']);
-        }
-        
         return $fields;
     }
 
@@ -1233,152 +632,6 @@ class WcBetterShippingCalculatorForBrazil
         return $args;
     }
 
-    public function lkn_register_custom_cep_route()
-    {
-        register_rest_route('lknwcbettershipping/v1', '/cep/', array(
-            'methods' => 'GET',
-            'callback' => array($this, 'lkn_get_cep_info'),
-            'permission_callback' => '__return_true',
-            'args' => array(
-                'postcode' => array(
-                    'required' => true,
-                )
-            ),
-        ));
-    }
-
-    /**
-     * Endpoint para receber o CEP via API personalizada.
-     *
-     * @param \WP_REST_Request $request Objeto da requisição REST contendo o parâmetro `postcode`.
-     * 
-     * @return \WP_REST_Response Retorna uma resposta com o status e o CEP recebido.
-     */
-    public function lkn_get_cep_info(\WP_REST_Request $request)
-    {
-        // Pega o parâmetro cep da requisição
-        $cep = $request->get_param('postcode');
-
-        if ($this->is_playground_environment()) {
-            return new \WP_REST_Response(
-                array(
-                    'status' => true,
-                    'city' => 'Cidade',
-                    'state_sigla' => 'SP',
-                    'state' => 'Sao Paulo',
-                    'address' => 'Endereço'
-                ),
-                200
-            );
-        }
-
-        $country = 'BR';
-
-        if (function_exists('WC') && WC()->customer && method_exists(WC()->customer, 'get_shipping_country')) {
-            $country = WC()->customer->get_shipping_country();
-        }
-
-        // Verifica se o país é o Brasil (BR)
-        if (isset($country) && strtolower($country) !== 'br') {
-            return new \WP_REST_Response(
-                array(
-                    'status' => false,
-                    'message' => 'Somente CEPs do Brasil são aceitos.',
-                ),
-                400 // Erro de solicitação inválida
-            );
-        }
-
-        // Verifica se o CEP tem exatamente 8 dígitos numéricos, com ou sem hífen
-        if (!preg_match('/^\d{8}$/', $cep) && !preg_match('/^\d{5}-\d{3}$/', $cep)) {
-            return new \WP_REST_Response(
-                array(
-                    'status' => false,
-                    'message' => 'CEP inválido. O formato correto é XXXXX-XXX ou XXXXXXXX.',
-                ),
-                400 // Erro de solicitação inválida
-            );
-        }
-
-        // Se o formato for XXXXX-XXX (com hífen), remove o hífen para obter apenas os dígitos
-        if (preg_match('/^\d{5}-\d{3}$/', $cep)) {
-            $cep = str_replace('-', '', $cep);
-        }
-
-        // Realiza a requisição à BrasilAPI
-        $response = wp_remote_get("https://brasilapi.com.br/api/cep/v2/{$cep}");
-        $http_code = wp_remote_retrieve_response_code($response);
-        $data = [];
-
-        // Verifica se houve erro na requisição
-        if (is_wp_error($response) || $http_code !== 200) {
-            $ws_response = wp_remote_get("https://viacep.com.br/ws/{$cep}/json/");
-
-            $ws_response_body = wp_remote_retrieve_body($ws_response);
-            $ws_response_data = json_decode($ws_response_body, true);
-
-            if (isset($ws_response_data['cep'])) {
-                $data = [
-                    'status' => true,
-                    'cep' => $ws_response_data['cep'],
-                    'city' => $ws_response_data['localidade'],
-                    'state_sigla' => $ws_response_data['uf'],
-                    'state' => $ws_response_data['estado'],
-                    'street' => $ws_response_data['logradouro']
-                ];
-            } else {
-                return new \WP_REST_Response(
-                    array(
-                        'status' => false,
-                        'message' => 'CEP inválido.',
-                    ),
-                    400
-                );
-            }
-        } else {
-            // Pega o corpo da resposta e converte em um array
-            $body = wp_remote_retrieve_body($response);
-            $data = json_decode($body, true);
-        }
-
-
-        // Verifica se o CEP foi encontrado na resposta
-        if (isset($data['cep'])) {
-            $state = $this->lkn_get_state_name_from_sigla($data['state']);
-
-            return new \WP_REST_Response(
-                array(
-                    'status' => true,
-                    'city' => $data['city'],
-                    'state_sigla' => $data['state'],
-                    'state' => $state,
-                    'address' => $data['street']
-                ),
-                200
-            );
-        }
-
-        // Caso a resposta seja um erro, como no caso de CEP inválido
-        if (isset($data['errors']) && !empty($data['errors'])) {
-            return new \WP_REST_Response(
-                array(
-                    'status' => false,
-                    'message' => 'Cep não encontrado ou inválido.',
-                ),
-                404 // Erro de validação de CEP
-            );
-        }
-
-        // Caso o CEP não seja encontrado
-        return new \WP_REST_Response(
-            array(
-                'status' => false,
-                'message' => 'CEP não encontrado.',
-            ),
-            404 // Erro de não encontrado
-        );
-    }
-
     /**
      * Register all of the hooks related to the public-facing functionality
      * of the plugin.
@@ -1393,29 +646,11 @@ class WcBetterShippingCalculatorForBrazil
         $this->loader->add_action('wp_enqueue_scripts', $plugin_public, 'enqueue_styles');
         $this->loader->add_action('wp_enqueue_scripts', $plugin_public, 'enqueue_scripts', 900);
 
-        $this->loader->add_action('wp_ajax_register_product_address', $this, 'lkn_register_product_address');
-        $this->loader->add_action('wp_ajax_nopriv_register_product_address', $this, 'lkn_register_product_address');
-
-        $this->loader->add_action('wp_ajax_register_cart_address', $this, 'lkn_register_cart_address');
-        $this->loader->add_action('wp_ajax_nopriv_register_cart_address', $this, 'lkn_register_cart_address');
-
-        $this->loader->add_action('wp_ajax_wc_better_calc_get_nonce', $this, 'wc_better_calc_get_nonce');
-        $this->loader->add_action('wp_ajax_nopriv_wc_better_calc_get_nonce', $this, 'wc_better_calc_get_nonce');
-
-        $this->loader->add_action('wp_ajax_wc_better_get_cart_shipping_status', $this, 'wc_better_get_cart_shipping_status');
-        $this->loader->add_action('wp_ajax_nopriv_wc_better_get_cart_shipping_status', $this, 'wc_better_get_cart_shipping_status');
-
         $this->loader->add_filter('woocommerce_checkout_fields', $this, 'wc_better_calc_checkout_fields', 999);
         $this->loader->add_filter( 'wc_address_i18n_params', $this, 'postcode_param_priority', 999);
         
         $this->loader->add_action('wp_ajax_wc_better_insert_address', $this, 'wc_better_insert_address');
         $this->loader->add_action('wp_ajax_nopriv_wc_better_insert_address', $this, 'wc_better_insert_address');
-
-        $this->loader->add_action('wp_ajax_wc_better_get_user_postcode', $this, 'wc_better_get_user_postcode');
-        $this->loader->add_action('wp_ajax_nopriv_wc_better_get_user_postcode', $this, 'wc_better_get_user_postcode');
-
-        $this->loader->add_action('wp_ajax_wc_better_persist_postcode', $this, 'wc_better_persist_postcode');
-        $this->loader->add_action('wp_ajax_nopriv_wc_better_persist_postcode', $this, 'wc_better_persist_postcode');
 
         $this->loader->add_action('woocommerce_get_country_locale', $this, 'wc_better_calc_phone_number', 10, 1);
         $this->loader->add_filter('woocommerce_get_country_locale', $this, 'lkn_checkout_fields_locale_priority', 11, 1);
@@ -1452,17 +687,9 @@ class WcBetterShippingCalculatorForBrazil
 
         // Hook para validação de Inscrição Estadual (IE) no checkout clássico
         $this->loader->add_action('woocommerce_checkout_process', $this, 'validate_ie_field_value_classic');
-        
-        // Hooks para controlar campos da calculadora de frete no carrinho
-        $this->loader->add_filter('woocommerce_shipping_calculator_enable_country', $this, 'maybe_disable_cart_fields');
-        $this->loader->add_filter('woocommerce_shipping_calculator_enable_state', $this, 'maybe_disable_cart_fields');
-        $this->loader->add_filter('woocommerce_shipping_calculator_enable_city', $this, 'maybe_disable_cart_fields');
-        
-        // Hook para verificar CEP e enfileirar script se necessário
-        $this->loader->add_action('wp_enqueue_scripts', $this, 'maybe_enqueue_display_form_script');
-        
-        // Hook para auto-preencher endereço baseado no CEP na calculadora de frete
-        $this->loader->add_action('woocommerce_calculated_shipping', $this, 'auto_fill_address_from_postcode');
+
+        // Hook para validação de DDD do telefone no checkout clássico
+        $this->loader->add_action('woocommerce_checkout_process', $this, 'validate_phone_ddd_classic');
         
         // Hooks para compatibilidade com APIs REST (conversão F/J) - apenas se plugin oficial não estiver ativo
         if (!$this->is_brazilian_plugin_active()) {
@@ -1520,278 +747,6 @@ class WcBetterShippingCalculatorForBrazil
         }
         
         return $params;
-    }
-
-    /**
-     * Controla se o campo país deve ser exibido na calculadora de frete do carrinho
-     *
-     * @param bool $enabled
-     * @return bool
-     */
-    public function maybe_disable_cart_fields($enabled)
-    {
-        if($this->is_cart_shortcode_page()){
-            return false;
-        }
-
-        return $enabled;
-    }
-
-    /**
-     * Verifica se não existe CEP no carrinho e enfileira script para forçar exibição do campo do CEP
-     */
-    public function maybe_enqueue_display_form_script()
-    {
-        // Só executa em páginas de carrinho shortcode
-        if (!$this->is_cart_shortcode_page()) {
-            return;
-        }
-        
-        // Verifica se WooCommerce está ativo e customer disponível
-        if (!$this->is_valid_woocommerce_context() || !WC()->customer) {
-            return;
-        }
-        
-        $has_postcode = false;
-        
-        // Verifica CEP de entrega
-        $shipping_postcode = WC()->customer->get_shipping_postcode();
-        if (!empty($shipping_postcode)) {
-            $has_postcode = true;
-        }
-        
-        // Verifica CEP de cobrança
-        if (!$has_postcode) {
-            $billing_postcode = WC()->customer->get_billing_postcode();
-            if (!empty($billing_postcode)) {
-                $has_postcode = true;
-            }
-        }
-        
-        // Se não tem CEP, enfileira o script
-        if (!$has_postcode) {
-            wp_enqueue_script(
-                'WcBetterShippingCalculatorForBrazilDisplayFormInShortcodeCart',
-                WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Public/jsCompiled/WcBetterShippingCalculatorForBrazilDisplayFormInShortcodeCart.COMPILED.js',
-                array('jquery'),
-                WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION,
-                true
-            );
-        }
-    }
-    
-    /**
-     * Verifica se estamos na página do carrinho via shortcode
-     *
-     * @return bool
-     */
-    private function is_cart_shortcode_page()
-    {
-        global $post;
-        
-        // Verifica se é uma página de carrinho
-        $is_cart_page = function_exists('is_cart') && is_cart();
-        
-        // Verifica se é carrinho em blocos
-        $is_blocks_cart = false;
-        if (function_exists('has_block') && isset($post) && is_a($post, 'WP_Post')) {
-            $is_blocks_cart = has_block('woocommerce/cart', $post);
-        }
-        
-        // Se há blocos de carrinho, não é shortcode/clássico
-        if ($is_blocks_cart) {
-            return false;
-        }
-        
-        // Se estamos na página de carrinho mas não é bloco, trata como shortcode/clássico
-        return $is_cart_page;
-    }
-
-    /**
-     * Auto-preenche endereço baseado no CEP quando a calculadora de frete é atualizada
-     *
-     * @return void
-     */
-    public function auto_fill_address_from_postcode($data)
-    {
-        if (!$this->is_valid_woocommerce_context() || !WC()->customer) {
-            return;
-        }
-
-        // Tenta pegar CEP do POST primeiro (quando calculadora é atualizada)
-        $postcode = '';
-        if (isset($_POST['calc_shipping_postcode'])) {
-            $postcode = sanitize_text_field(wp_unslash($_POST['calc_shipping_postcode']));
-        } elseif (isset($_POST['shipping_postcode'])) {
-            $postcode = sanitize_text_field(wp_unslash($_POST['shipping_postcode']));
-        } else {
-            $postcode = WC()->customer->get_shipping_postcode();
-        }
-        
-        // Se não há CEP, mostra erro apenas se foi enviado formulário
-        if (empty($postcode)) {
-            if (isset($_POST['calc_shipping_postcode']) || isset($_POST['shipping_postcode'])) {
-                wc_add_notice(__('Por favor, informe um CEP válido para calcular o frete.', 'woo-better-shipping-calculator-for-brazil'), 'error');
-            }
-            return;
-        }
-
-        // Valida formato do CEP brasileiro
-        if (!preg_match('/^\d{8}$/', $postcode) && !preg_match('/^\d{5}-\d{3}$/', $postcode)) {
-            // translators: %s is the postcode entered by the user
-            wc_add_notice(sprintf(__('O CEP "%s" não possui um formato válido. Use o formato 00000-000.', 'woo-better-shipping-calculator-for-brazil'), $postcode), 'error');
-            return;
-        }
-
-        // Remove caracteres não numéricos para validação
-        $clean_postcode = preg_replace('/[^0-9]/', '', $postcode);
-        if (strlen($clean_postcode) !== 8) {
-            // translators: %s is the postcode entered by the user
-            wc_add_notice(sprintf(__('O CEP "%s" deve conter exatamente 8 dígitos.', 'woo-better-shipping-calculator-for-brazil'), $postcode), 'error');
-            return;
-        }
-
-        // Busca informações do CEP
-        $cep_data = $this->get_cep_data_for_shipping($postcode);
-        
-        if (!empty($cep_data) && $cep_data['status'] === true) {
-            // Normaliza o CEP para formato XXXXX-XXX
-            $normalized_postcode = preg_replace('/[^0-9]/', '', $postcode);
-            if (strlen($normalized_postcode) === 8) {
-                $normalized_postcode = substr($normalized_postcode, 0, 5) . '-' . substr($normalized_postcode, 5);
-            }
-            
-            // Preenche os dados do cliente
-            WC()->customer->set_shipping_postcode($normalized_postcode);
-            WC()->customer->set_billing_postcode($normalized_postcode);
-            
-            // Força o país como Brasil
-            WC()->customer->set_shipping_country('BR');
-            WC()->customer->set_billing_country('BR');
-
-            if (!empty($cep_data['city'])) {
-                WC()->customer->set_shipping_city($cep_data['city']);
-                WC()->customer->set_billing_city($cep_data['city']);
-            }
-            
-            if (!empty($cep_data['state_sigla'])) {
-                WC()->customer->set_shipping_state($cep_data['state_sigla']);
-                WC()->customer->set_billing_state($cep_data['state_sigla']);
-            }
-            
-            if (!empty($cep_data['address'])) {
-                WC()->customer->set_shipping_address_1($cep_data['address']);
-                WC()->customer->set_billing_address_1($cep_data['address']);
-            }
-            
-            // Força a atualização dos dados na sessão
-            WC()->customer->save();
-        } else {
-            // Erro ao buscar dados do CEP - usa a mensagem de erro específica se disponível
-            $error_message = '';
-            if (!empty($cep_data) && isset($cep_data['error'])) {
-                // translators: %1$s is the postcode entered by the user, %2$s is the specific error message
-                $error_message = sprintf(__('Erro ao buscar CEP "%1$s": %2$s', 'woo-better-shipping-calculator-for-brazil'), $postcode, $cep_data['error']);
-            } else {
-                // translators: %s is the postcode entered by the user
-                $error_message = sprintf(__('Não foi possível encontrar informações para o CEP "%s". Verifique se está correto ou preencha o endereço manualmente.', 'woo-better-shipping-calculator-for-brazil'), $postcode);
-            }
-            wc_add_notice($error_message, 'error');
-        }
-    }
-
-    /**
-     * Busca dados do CEP para preenchimento de endereço de entrega
-     *
-     * @param string $postcode
-     * @return array|null
-     */
-    private function get_cep_data_for_shipping($postcode)
-    {
-        if ($this->is_playground_environment()) {
-            return [
-                'status' => true,
-                'city' => 'Cidade',
-                'state_sigla' => 'SP',
-                'state' => 'Sao Paulo',
-                'address' => 'Endereço'
-            ];
-        }
-
-        // Normaliza o CEP
-        $cep = preg_replace('/[^0-9]/', '', $postcode);
-        if (strlen($cep) === 8) {
-            $cep = substr($cep, 0, 5) . '-' . substr($cep, 5);
-        }
-
-        $last_error = '';
-
-        // Tenta BrasilAPI primeiro
-        $response = wp_remote_get("https://brasilapi.com.br/api/cep/v2/{$cep}", [
-            'timeout' => 10,
-            'headers' => [
-                'User-Agent' => 'WooCommerce-Better-Shipping-Calculator/1.0'
-            ]
-        ]);
-        
-        if (!is_wp_error($response)) {
-            $response_code = wp_remote_retrieve_response_code($response);
-            $body = wp_remote_retrieve_body($response);
-            $data = json_decode($body, true);
-            
-            if ($response_code === 200 && isset($data['cep'])) {
-                $state = $this->lkn_get_state_name_from_sigla($data['state']);
-                
-                return [
-                    'status' => true,
-                    'city' => $data['city'],
-                    'state_sigla' => $data['state'],
-                    'state' => $state,
-                    'address' => $data['street']
-                ];
-            } elseif ($response_code === 404) {
-                $last_error = 'CEP não encontrado';
-            } else {
-                $last_error = 'Erro no serviço BrasilAPI';
-            }
-        } else {
-            $last_error = 'Falha na conexão com BrasilAPI: ' . $response->get_error_message();
-        }
-
-        // Fallback para ViaCEP
-        $ws_response = wp_remote_get("https://viacep.com.br/ws/{$cep}/json/", [
-            'timeout' => 10,
-            'headers' => [
-                'User-Agent' => 'WooCommerce-Better-Shipping-Calculator/1.0'
-            ]
-        ]);
-        
-        if (!is_wp_error($ws_response)) {
-            $response_code = wp_remote_retrieve_response_code($ws_response);
-            $ws_response_body = wp_remote_retrieve_body($ws_response);
-            $ws_response_data = json_decode($ws_response_body, true);
-            
-            if ($response_code === 200 && isset($ws_response_data['cep']) && !isset($ws_response_data['erro'])) {
-                return [
-                    'status' => true,
-                    'city' => $ws_response_data['localidade'],
-                    'state_sigla' => $ws_response_data['uf'],
-                    'state' => $ws_response_data['estado'],
-                    'address' => $ws_response_data['logradouro']
-                ];
-            } elseif (isset($ws_response_data['erro'])) {
-                $last_error = 'CEP não encontrado no ViaCEP';
-            } else {
-                $last_error = 'Erro no serviço ViaCEP';
-            }
-        } else {
-            $last_error = 'Falha na conexão com ViaCEP: ' . $ws_response->get_error_message();
-        }
-
-        return [
-            'status' => false,
-            'error' => $last_error
-        ];
     }
 
     /**
@@ -2701,11 +1656,53 @@ class WcBetterShippingCalculatorForBrazil
                 $clean_country_code = '+' . $clean_country_code;
             }
             
+            // Autofill pode trazer o DDI embutido sem "+" (ex.: "5585988888888").
+            // Nesse caso só prefixa o "+", para não duplicar o DDI no número final
+            // ("+555585988888888"). A checagem de >= 12 dígitos evita confundir com
+            // um DDD nacional que coincida com o DDI (ex.: DDD 55 do RS = 11 dígitos).
+            $cc_digits = preg_replace('/[^0-9]/', '', $clean_country_code);
+            if ($cc_digits !== '' && strpos($clean_phone, $cc_digits) === 0 && strlen($clean_phone) >= 12) {
+                return '+' . $clean_phone;
+            }
+            
             return $clean_country_code . $clean_phone;
         }
         
         // Se não tem código do país, deixa como está
         return $clean_phone;
+    }
+
+    /**
+     * Normaliza o telefone do pedido para o formato internacional limpo.
+     *
+     * Mantém apenas dígitos e um "+" inicial, prefixando o DDI quando houver.
+     * O telefone fica "tudo junto" (+DDInúmero), sem espaços, parênteses, hífens
+     * ou outros caracteres especiais. Só atua quando a máscara/DDI está ativa.
+     *
+     * @param WC_Order $order
+     * @param string   $type         'billing' | 'shipping'
+     * @param string   $country_code Ex.: '+55'
+     * @return void
+     */
+    private function normalize_order_phone($order, $type, $country_code)
+    {
+        $phone_mask_enabled = get_option('woo_better_calc_apply_phone_mask', get_option('woo_better_calc_contact_required', 'no'));
+        if ($phone_mask_enabled !== 'yes') {
+            return;
+        }
+
+        $phone = ($type === 'shipping') ? $order->get_shipping_phone() : $order->get_billing_phone();
+        if (empty($phone)) {
+            return;
+        }
+
+        $normalized = $this->format_complete_phone($phone, $country_code);
+
+        if ($type === 'shipping') {
+            $order->set_shipping_phone($normalized);
+        } else {
+            $order->set_billing_phone($normalized);
+        }
     }
     
     /**
@@ -3094,7 +2091,7 @@ class WcBetterShippingCalculatorForBrazil
         if (!$this->validate_cnpj($clean)) {
             throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
                 'woo_better_calc_cnpj_invalid',
-                __('CNPJ inválido. Verifique os números informados.', 'woo-better-shipping-calculator-for-brazil'),
+                esc_html__('CNPJ inválido. Verifique os números informados.', 'woo-better-shipping-calculator-for-brazil'),
                 400
             );
         }
@@ -3104,7 +2101,7 @@ class WcBetterShippingCalculatorForBrazil
         if (!empty($api_error)) {
             throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
                 'woo_better_calc_cnpj_invalid',
-                $api_error,
+                esc_html($api_error),
                 400
             );
         }
@@ -3272,6 +2269,99 @@ class WcBetterShippingCalculatorForBrazil
 
         if ('' === trim($billing_ie)) {
             wc_add_notice(__('Por favor, preencha a Inscrição Estadual (IE) ou marque como ISENTO.', 'woo-better-shipping-calculator-for-brazil'), 'error');
+        }
+    }
+
+    /**
+     * Retorna o tipo de erro do telefone, usando o libphonenumber (~300 países).
+     *
+     * - null     : válido
+     * - 'ddd'    : número não casa o padrão/código de área (DDD) do país
+     * - 'invalid': comprimento errado (muito curto ou muito longo) ou tipo não aceito
+     *
+     * @param string $phone        Telefone (pode vir com ou sem DDI/formatação)
+     * @param string $country_code Ex.: '+55' (vazio = assume Brasil)
+     * @return string|null
+     */
+    private function phone_validation_error($phone, $country_code = '') {
+        // Normaliza para E.164 (+DDInúmero) usando a rotina existente do plugin.
+        $normalized = $this->format_complete_phone($phone, $country_code);
+        if ('' === $normalized) {
+            return null;
+        }
+
+        if (! class_exists('\\libphonenumber\\PhoneNumberUtil')) {
+            // Lib não instalada (composer install pendente): não bloqueia o checkout.
+            return null;
+        }
+
+        $phone_util = \libphonenumber\PhoneNumberUtil::getInstance();
+
+        try {
+            // 'BR' é o fallback quando o número chega sem DDI (nacional).
+            $number = $phone_util->parse($normalized, 'BR');
+        } catch (\libphonenumber\NumberParseException $e) {
+            return 'invalid';
+        }
+
+        // Comprimento inválido → erro genérico de número.
+        if (! $phone_util->isPossibleNumber($number)) {
+            return 'invalid';
+        }
+
+        // Comprimento ok, mas o padrão/DDD do país não casa → DDD inválido.
+        if (! $phone_util->isValidNumber($number)) {
+            return 'ddd';
+        }
+
+        // Aceita fixo + celular; rejeita toll-free/premium/etc.
+        $type = $phone_util->getNumberType($number);
+        $allowed = array(
+            \libphonenumber\PhoneNumberType::FIXED_LINE,
+            \libphonenumber\PhoneNumberType::MOBILE,
+            \libphonenumber\PhoneNumberType::FIXED_LINE_OR_MOBILE
+        );
+        if (! in_array($type, $allowed, true)) {
+            return 'invalid';
+        }
+
+        return null;
+    }
+
+    /**
+     * Valida o número de telefone no checkout clássico (shortcode).
+     *
+     * Aplica somente quando a opção "Validar Número de Telefone" está habilitada.
+     * No checkout em blocos a validação é feita no cliente (intl-tel-input).
+     *
+     * @return void
+     */
+    public function validate_phone_ddd_classic() {
+        $validate_enabled = get_option('woo_better_calc_validate_ddd', 'yes');
+        $phone_mask_enabled = get_option('woo_better_calc_apply_phone_mask', get_option('woo_better_calc_contact_required', 'no'));
+
+        if ($validate_enabled !== 'yes' || $phone_mask_enabled !== 'yes') {
+            return;
+        }
+
+        $billing_phone = isset($_POST['billing_phone']) ? sanitize_text_field(wp_unslash($_POST['billing_phone'])) : '';
+        $billing_country = isset($_POST['billing_phone_country']) ? sanitize_text_field(wp_unslash($_POST['billing_phone_country'])) : '';
+
+        $billing_error = ('' !== trim($billing_phone)) ? $this->phone_validation_error($billing_phone, $billing_country) : null;
+        if ($billing_error !== null) {
+            wc_add_notice(__('Número de telefone inválido.', 'woo-better-shipping-calculator-for-brazil'), 'error');
+            return;
+        }
+
+        $ship_to_different = isset($_POST['ship_to_different_address']) ? sanitize_text_field(wp_unslash($_POST['ship_to_different_address'])) : '';
+        if ($ship_to_different) {
+            $shipping_phone = isset($_POST['shipping_phone']) ? sanitize_text_field(wp_unslash($_POST['shipping_phone'])) : '';
+            $shipping_country = isset($_POST['shipping_phone_country']) ? sanitize_text_field(wp_unslash($_POST['shipping_phone_country'])) : '';
+
+            $shipping_error = ('' !== trim($shipping_phone)) ? $this->phone_validation_error($shipping_phone, $shipping_country) : null;
+            if ($shipping_error !== null) {
+                wc_add_notice(__('Número de telefone de entrega inválido.', 'woo-better-shipping-calculator-for-brazil'), 'error');
+            }
         }
     }
     
@@ -3513,6 +2603,11 @@ class WcBetterShippingCalculatorForBrazil
             }
         }
 
+        // Normaliza os telefones do pedido para o formato limpo (+DDInúmero,
+        // sem caracteres especiais), concatenando o DDI ao número.
+        $this->normalize_order_phone($order, 'billing', $billing_country_code);
+        $this->normalize_order_phone($order, 'shipping', $shipping_country_code);
+
         // Salvar código do país do telefone de faturação
         if (!empty($billing_country_code)) {
             $order->update_meta_data('_billing_phone_country_code', $billing_country_code);
@@ -3605,6 +2700,177 @@ class WcBetterShippingCalculatorForBrazil
         }
     }
 
+    /**
+     * Garante a sincronização da visibilidade do telefone nativo com o
+     * "Destaque do Campo Telefone".
+     *
+     * Executa no init (toda requisição): roda a sincronização uma vez por versão
+     * do plugin, para que o campo nativo seja ocultado/restaurado conforme o
+     * destaque atual sem o lojista precisar salvar qualquer configuração.
+     */
+    public function ensure_phone_field_option() {
+        // Migração: remove flag obsoleta de versões anteriores da feature.
+        // Agora a evidência de ocultação pelo plugin é a própria opção
+        // woo_better_calc_phone_field_previous.
+        if (get_option('woo_better_calc_phone_field_managed') !== false) {
+            delete_option('woo_better_calc_phone_field_managed');
+        }
+
+        // Sincroniza automaticamente uma vez por versão do plugin. Assim, ao
+        // atualizar o plugin, o campo nativo é ocultado conforme a opção atual
+        // (default 'yes') sem depender de o lojista salvar as configurações.
+        $synced_version = get_option('woo_better_calc_phone_field_synced_version', '');
+        if ($synced_version !== $this->version) {
+            $this->sync_phone_field();
+            update_option('woo_better_calc_phone_field_synced_version', $this->version);
+        }
+    }
+
+    /**
+     * Verifica se a opção "Telefone (Contato) Obrigatório" está ativa.
+     *
+     * @return bool
+     */
+    private function is_phone_required() {
+        return get_option('woo_better_calc_contact_required', 'no') === 'yes';
+    }
+
+    /**
+     * Verifica se a opção "Destaque do Campo Telefone" está ativa.
+     *
+     * @return bool
+     */
+    private function is_phone_highlight() {
+        return get_option('woo_better_calc_contact_field_position', 'no') === 'yes';
+    }
+
+    /**
+     * Sincroniza a VISIBILIDADE do campo de telefone nativo com o "Destaque do
+     * Campo Telefone" (woo_better_calc_contact_field_position).
+     *
+     * O nativo é a MESMA opção (woocommerce_checkout_phone_field) usada pelo toggle
+     * "Telefone" do editor de checkout em blocos. Mapeamento:
+     *
+     * - destaque ligado   → campo próprio (destaque): oculta o nativo.
+     * - destaque desligado → telefone nativo visível (required/optional).
+     *
+     * Ao ocultar, guarda o último estado visível em
+     * woo_better_calc_phone_field_previous (evidência de que fomos nós que ocultamos).
+     * Ao desligar o destaque, restaura o estado visível respeitando a opção de
+     * obrigatoriedade; se o usuário ocultou o nativo por conta própria e o plugin
+     * nunca o ocultou, não mexe.
+     */
+    public function sync_phone_field() {
+        // Evita reentrância: update_option() do nativo re-dispara os hooks.
+        if (self::$phone_field_syncing) {
+            return;
+        }
+        self::$phone_field_syncing = true;
+
+        try {
+            $native_phone = get_option('woocommerce_checkout_phone_field', 'optional');
+            $owns_hidden = get_option('woo_better_calc_phone_field_previous', false) !== false;
+            $target_visible = $this->is_phone_required() ? 'required' : 'optional';
+
+            // 'yes' (Destaque do Campo Telefone) usa o campo próprio e oculta o
+            // nativo; caso contrário o telefone é o campo nativo do WooCommerce.
+            $should_hide = $this->is_phone_highlight();
+
+            if ($should_hide) {
+                // Destaque ativo: o nativo precisa ficar oculto.
+                if ($native_phone !== 'hidden') {
+                    // Seta a flag ANTES de ocultar, guardando o estado visível atual.
+                    update_option('woo_better_calc_phone_field_previous', $native_phone);
+                    update_option('woocommerce_checkout_phone_field', 'hidden');
+                }
+            } else {
+                // Sem destaque: restaura só se o plugin havia ocultado.
+                if ($native_phone === 'hidden' && ! $owns_hidden) {
+                    // Usuário ocultou o nativo por conta própria → não mexe.
+                    return;
+                }
+                if ($native_phone !== $target_visible) {
+                    update_option('woocommerce_checkout_phone_field', $target_visible);
+                }
+                if ($owns_hidden) {
+                    delete_option('woo_better_calc_phone_field_previous');
+                }
+            }
+        } finally {
+            self::$phone_field_syncing = false;
+        }
+    }
+
+    /**
+     * Propaga a OBRIGATORIEDADE da opção "Telefone (Contato) Obrigatório" para o
+     * campo nativo (woocommerce_checkout_phone_field = required/optional).
+     *
+     * Só atua quando o destaque está desligado; com o destaque ativo o campo
+     * próprio substitui o nativo (que fica oculto e não é tocado).
+     */
+    public function sync_native_from_contact_required() {
+        if (self::$phone_field_syncing) {
+            return;
+        }
+        self::$phone_field_syncing = true;
+
+        try {
+            if ($this->is_phone_highlight()) {
+                return; // destaque ativo: o nativo está oculto, não mexe
+            }
+
+            $native_phone = get_option('woocommerce_checkout_phone_field', 'optional');
+            $owns_hidden = get_option('woo_better_calc_phone_field_previous', false) !== false;
+
+            if ($native_phone === 'hidden' && ! $owns_hidden) {
+                return; // usuário ocultou o nativo por conta própria → não mexe
+            }
+
+            $target = $this->is_phone_required() ? 'required' : 'optional';
+            if ($native_phone !== $target) {
+                update_option('woocommerce_checkout_phone_field', $target);
+            }
+        } finally {
+            self::$phone_field_syncing = false;
+        }
+    }
+
+    /**
+     * Ida e volta: quando a opção nativa muda (editor do checkout em blocos),
+     * reflete em "Telefone (Contato) Obrigatório".
+     *
+     * - required → contact_required = yes
+     * - optional → contact_required = no
+     * - hidden   → não altera a obrigatoriedade (só visibilidade)
+     *
+     * Assinatura do hook dinâmico update_option_{$option}: ($old_value, $value, $option).
+     *
+     * @param mixed  $old_value Valor anterior.
+     * @param mixed  $new_value Valor novo.
+     * @param string $option    Nome da opção.
+     */
+    public function sync_contact_required_from_native($old_value = null, $new_value = null, $option = '') {
+        if (self::$phone_field_syncing) {
+            return;
+        }
+        self::$phone_field_syncing = true;
+
+        try {
+            if ($new_value === 'required') {
+                update_option('woo_better_calc_contact_required', 'yes');
+            } elseif ($new_value === 'optional') {
+                update_option('woo_better_calc_contact_required', 'no');
+            }
+
+            // Destaque ativo → o nativo precisa permanecer oculto.
+            if ($new_value !== 'hidden' && $this->is_phone_highlight()) {
+                update_option('woocommerce_checkout_phone_field', 'hidden');
+            }
+        } finally {
+            self::$phone_field_syncing = false;
+        }
+    }
+
     // Função específica para WooCommerce Block Checkout
     public function process_checkout_data_blocks($order, $request)
     {
@@ -3687,6 +2953,11 @@ class WcBetterShippingCalculatorForBrazil
                 $billing_country_code = $shipping_country_code;
             }
         }
+
+        // Normaliza os telefones do pedido para o formato limpo (+DDInúmero,
+        // sem caracteres especiais), concatenando o DDI ao número.
+        $this->normalize_order_phone($order, 'billing', $billing_country_code);
+        $this->normalize_order_phone($order, 'shipping', $shipping_country_code);
         
         // Salvar código do país do telefone de faturação
         if (!empty($billing_country_code)) {
@@ -4684,6 +3955,30 @@ class WcBetterShippingCalculatorForBrazil
             update_user_meta( get_current_user_id(), 'custom_phone', $custom_phone_formatted );
             update_user_meta( get_current_user_id(), 'custom_phone_formatted', $custom_phone_formatted );
         }
+
+        // Sincroniza o objeto do cliente WooCommerce.
+        //
+        // O checkout clássico/shortcode renderiza #billing_phone / #shipping_phone
+        // a partir de WC()->customer (get_billing_phone / get_shipping_phone), e NÃO
+        // das chaves de sessão acima. Sem sincronizar aqui, o valor exibido no
+        // clássico fica desatualizado (sem o "+DDI" ou com dígito faltando), pois a
+        // lib não consegue formatar um número inválido.
+        if ( function_exists('WC') && WC()->customer ) {
+            $phone_highlight = get_option('woo_better_calc_contact_field_position', 'no');
+
+            $customer_billing  = $billing_phone_formatted;
+            $customer_shipping = $shipping_phone_formatted;
+
+            // Modo destaque: o campo único vale para billing e shipping.
+            if ( $phone_highlight === 'yes' && ! empty( $custom_phone_formatted ) ) {
+                $customer_billing  = $custom_phone_formatted;
+                $customer_shipping = $custom_phone_formatted;
+            }
+
+            WC()->customer->set_billing_phone( $customer_billing );
+            WC()->customer->set_shipping_phone( $customer_shipping );
+            WC()->customer->save();
+        }
     }
 
     public function handle_shipping_as_billing_update( $data ) {
@@ -4748,10 +4043,11 @@ class WcBetterShippingCalculatorForBrazil
         $phone_required = get_option('woo_better_calc_contact_required', 'no');
         $phone_highlight = get_option('woo_better_calc_contact_field_position', 'no');
 
-        // Ocultar o campo nativo de telefone só faz sentido no checkout em blocos (Gutenberg).
-        // No checkout clássico/shortcode, o reposicionamento é feito via wc_better_calc_checkout_fields
-        // usando priority. Aplicar hidden=true no locale também no clássico causa o campo sumir
-        // a partir do WooCommerce 10.8.1+.
+        // REASON: Ocultar o campo nativo de telefone no locale só faz sentido no
+        // checkout em blocos (Gutenberg). No clássico/shortcode o reposicionamento
+        // é feito via wc_better_calc_checkout_fields usando priority, e aplicar
+        // hidden=true no locale também no clássico faz o campo sumir a partir do
+        // WooCommerce 10.8.1+.
         $is_blocks_checkout = false;
         if ( function_exists( 'has_block' ) ) {
             global $post;
@@ -4760,9 +4056,38 @@ class WcBetterShippingCalculatorForBrazil
             }
         }
 
+        // REASON: A visibilidade REAL do campo nativo é a fonte de verdade — este
+        // plugin a mantém sincronizada com o "Destaque do Campo Telefone"
+        // (woocommerce_checkout_phone_field = hidden). Não dá para decidir a
+        // obrigatoriedade só por $is_blocks_checkout: em requisições REST
+        // (validação do Store API) não existe $post e has_block() retorna false,
+        // fazendo o plugin marcar 'phone' como obrigatório mesmo com o nativo
+        // oculto. Como o WooCommerce remove 'phone' de get_default_address_fields()
+        // quando ele está oculto, o locale 'default' NÃO contém 'phone' com
+        // 'label'; a entrada então criada pelo plugin ficava sem 'label' e o
+        // OrderController (Store API) emitia "Undefined array key label" (linha
+        // 501) + erro espúrio "<vazio> is required" que bloqueava o pedido.
+        $native_phone_hidden = get_option('woocommerce_checkout_phone_field', 'optional') === 'hidden';
+        $hides_native_phone  = ($phone_highlight === 'yes' && $is_blocks_checkout) || $native_phone_hidden;
+
+        // REASON: O locale 'phone' serve dois consumidores com necessidades
+        // opostas. No checkout em blocos / Store API (REST) o nativo oculto perde
+        // o 'label' (o WooCommerce o remove de get_default_address_fields()), então
+        // exigir 'phone' gera "Undefined array key label" no OrderController
+        // (linha 501). Já no clássico/shortcode o address-i18n.js aplica o
+        // 'required' do locale ao campo VISÍVEL no cliente, DEPOIS do render do
+        // servidor: se o locale disser required=false o campo vira "(opcional)" na
+        // tela, mesmo com wc_better_calc_checkout_fields marcando-o obrigatório.
+        // Por isso só zeramos 'required' quando o campo é tratado fora do locale
+        // (blocos/REST). O filtro permite simular o contexto do Store API em testes.
+        $phone_handled_outside_locale = $is_blocks_checkout || (bool) apply_filters(
+            'wc_better_calc_is_store_api_request',
+            defined( 'REST_REQUEST' ) && REST_REQUEST
+        );
+
         // Carrega a lista de códigos de países
         $country_codes = include plugin_dir_path(__FILE__) . 'country-codes.php';
-        
+
         // Aplica as configurações para todos os países da lista
         foreach ($country_codes as $country_code) {
             // Garante que a chave 'phone' exista no array do país para evitar warnings do PHP
@@ -4770,18 +4095,25 @@ class WcBetterShippingCalculatorForBrazil
                 $locale[$country_code]['phone'] = [];
             }
 
-            // Aplica telefone obrigatório se a opção estiver ativada
-            if ($phone_required === 'yes') {
+            if ($hides_native_phone && $phone_handled_outside_locale) {
+                // Campo nativo oculto E tratado fora do locale (blocos/Store API):
+                // nunca exigir no locale. Evita requerimento sem 'label' no
+                // OrderController. A obrigatoriedade é cobrada pelo campo próprio
+                // (destaque) e/ou pelo JS.
+                $locale[$country_code]['phone']['required'] = false;
+
+                // Marca hidden no locale apenas no checkout em blocos.
+                if ($is_blocks_checkout) {
+                    $locale[$country_code]['phone']['hidden'] = true;
+                }
+            } elseif ($phone_required === 'yes') {
+                // Sem destaque OU checkout clássico/shortcode: o campo visível é
+                // obrigatório conforme a opção de contato. O address-i18n.js usa
+                // este 'required' para manter o campo obrigatório na tela.
                 $locale[$country_code]['phone']['required'] = true;
             }
-
-            // Oculta o campo nativo apenas no checkout em blocos.
-            // No shortcode/clássico o destaque é controlado via priority no wc_better_calc_checkout_fields.
-            if ($phone_highlight === 'yes' && $is_blocks_checkout) {
-                $locale[$country_code]['phone']['hidden'] = true;
-            }
         }
-        
+
         return $locale;
     }
 
@@ -4949,7 +4281,9 @@ class WcBetterShippingCalculatorForBrazil
             );
         }
 
-        if ($phone_required === 'yes') {
+        // Re-adiciona o campo de telefone no checkout clássico/shortcode para que
+        // o telefone continue disponível (a máscara é aplicada pelo script legado).
+        {
             if (!isset($fields['billing']['billing_phone'])) {
                 $fields['billing']['billing_phone_country'] = array(
                     'type'        => 'hidden',
@@ -4958,9 +4292,9 @@ class WcBetterShippingCalculatorForBrazil
                 );
                 $fields['billing']['billing_phone'] = array(
                     'type'        => 'tel',
-                    'label'       => __('Telefone', 'woo-better-shipping-calculator-for-brazil'),
+                    'label'       => __('Celular/Telefone', 'woo-better-shipping-calculator-for-brazil'),
                     'placeholder' => __('Digite o telefone', 'woo-better-shipping-calculator-for-brazil'),
-                    'required'    => true,
+                    'required'    => ($phone_required === 'yes'),
                     'class'       => array('form-row-wide'),
                     'priority'    => 92,
                 );
@@ -4980,9 +4314,9 @@ class WcBetterShippingCalculatorForBrazil
                 );
                 $fields['shipping']['shipping_phone'] = array(
                     'type'        => 'tel',
-                    'label'       => __('Telefone', 'woo-better-shipping-calculator-for-brazil'),
+                    'label'       => __('Celular/Telefone', 'woo-better-shipping-calculator-for-brazil'),
                     'placeholder' => __('Digite o telefone', 'woo-better-shipping-calculator-for-brazil'),
-                    'required'    => true,
+                    'required'    => ($phone_required === 'yes'),
                     'class'       => array('form-row-wide'),
                     'priority'    => 92,
                 );
@@ -4996,10 +4330,12 @@ class WcBetterShippingCalculatorForBrazil
 
 
             if (isset($fields['billing']['billing_phone'])) {
-                $fields['billing']['billing_phone']['required'] = true;
+                $fields['billing']['billing_phone']['label'] = __('Celular/Telefone', 'woo-better-shipping-calculator-for-brazil');
+                $fields['billing']['billing_phone']['required'] = ($phone_required === 'yes');
             }
             if (isset($fields['shipping']['shipping_phone'])) {
-                $fields['shipping']['shipping_phone']['required'] = true;
+                $fields['shipping']['shipping_phone']['label'] = __('Celular/Telefone', 'woo-better-shipping-calculator-for-brazil');
+                $fields['shipping']['shipping_phone']['required'] = ($phone_required === 'yes');
             }
         }
 
@@ -5320,775 +4656,6 @@ class WcBetterShippingCalculatorForBrazil
     }
 
     /**
-     * AJAX endpoint para retornar um nonce atualizado.
-     *
-     * @since 1.0.0
-     * @access public
-     * @param string $action (opcional) Nome da ação para o nonce. Default: 'woo_better_register_cart_address'.
-     * @return void JSON com o nonce gerado.
-     */
-    public function wc_better_calc_get_nonce() {
-        // Recebe o parâmetro 'action_nonce' via POST ou GET
-        if (!isset($_REQUEST['action_nonce']) || empty($_REQUEST['action_nonce'])) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'Parâmetro action_nonce obrigatório.'
-            ], 400);
-        }
-
-        $action = sanitize_text_field(wp_unslash($_REQUEST['action_nonce']));
-        $nonce = wp_create_nonce($action);
-        wp_send_json_success(['nonce' => $nonce]);
-    }
-
-    /**
-     * AJAX endpoint para obter o CEP do usuário da sessão
-     *
-     * @since 4.11.0
-     * @access public
-     * @return void JSON com o CEP do usuário
-     */
-    public function wc_better_get_user_postcode() {
-        // Headers anti-cache para evitar que LiteSpeed/similares cacheiem a resposta
-        header('Cache-Control: no-cache, no-store, must-revalidate, max-age=0');
-        header('Pragma: no-cache');
-        header('Expires: Wed, 11 Jan 1984 05:00:00 GMT');
-        
-        // Verifica nonce
-        if (!isset($_POST['nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['nonce'])), 'wc_better_get_user_postcode')) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'Falha na verificação de segurança (nonce).'
-            ], 403);
-        }
-        
-        // Verifica se WooCommerce está disponível
-        if (!function_exists('WC')) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'WooCommerce não está disponível.'
-            ], 400);
-        }
-
-        $cart_cep = '';
-        if (WC()->customer) {
-            $cart_cep = WC()->customer->get_billing_postcode();
-            if (empty($cart_cep)) {
-                $cart_cep = WC()->customer->get_shipping_postcode();
-            }
-        }
-
-        wp_send_json_success([
-            'postcode' => $cart_cep
-        ]);
-    }
-
-    /**
-     * AJAX endpoint para persistir apenas o CEP no WC()->customer.
-     * Usado quando a API de CEP retorna erro (CEP inválido) — salva o postcode
-     * sem tocar nos demais campos de endereço.
-     *
-     * @since 4.16.11
-     * @access public
-     * @return void JSON
-     */
-    public function wc_better_persist_postcode() {
-        // Verifica nonce
-        if (!isset($_POST['nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['nonce'])), 'wc_better_get_user_postcode')) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'Falha na verificação de segurança (nonce).'
-            ], 403);
-        }
-
-        // Verifica se WooCommerce está disponível
-        if (!function_exists('WC')) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'WooCommerce não está disponível.'
-            ], 400);
-        }
-
-        $postcode = isset($_POST['postcode']) ? sanitize_text_field(wp_unslash($_POST['postcode'])) : '';
-
-        if (empty($postcode) || !WC()->customer) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'CEP inválido ou cliente não disponível.'
-            ], 400);
-        }
-
-        // Salva APENAS o postcode
-        WC()->customer->set_shipping_postcode($postcode);
-        WC()->customer->set_billing_postcode($postcode);
-        WC()->customer->set_shipping_country('BR');
-        WC()->customer->set_billing_country('BR');
-
-        // Limpa endereço antigo (CEP inválido não tem dados de rua/cidade/estado)
-        WC()->customer->set_shipping_address_1('');
-        WC()->customer->set_shipping_address_2('');
-        WC()->customer->set_shipping_city('');
-        WC()->customer->set_shipping_state('');
-        WC()->customer->set_billing_address_1('');
-        WC()->customer->set_billing_address_2('');
-        WC()->customer->set_billing_city('');
-        WC()->customer->set_billing_state('');
-
-        WC()->customer->save();
-
-        // Limpa endereço da sessão WC (número, bairro, rua, cidade, estado)
-        if (WC()->session) {
-            WC()->session->__unset('billing_number');
-            WC()->session->__unset('shipping_number');
-            WC()->session->__unset('billing_neighborhood');
-            WC()->session->__unset('shipping_neighborhood');
-            WC()->session->__unset('billing_address_1');
-            WC()->session->__unset('shipping_address_1');
-            WC()->session->__unset('billing_city');
-            WC()->session->__unset('shipping_city');
-            WC()->session->__unset('billing_state');
-            WC()->session->__unset('shipping_state');
-            WC()->session->__unset('billing_postcode');
-            WC()->session->__unset('shipping_postcode');
-            WC()->session->save_data();
-        }
-
-        // Limpa metadados de endereço do plugin no perfil do usuário logado
-        if (is_user_logged_in()) {
-            $user_id = get_current_user_id();
-            update_user_meta($user_id, 'billing_number', '');
-            update_user_meta($user_id, 'shipping_number', '');
-            update_user_meta($user_id, 'billing_neighborhood', '');
-            update_user_meta($user_id, 'shipping_neighborhood', '');
-        }
-
-        wp_send_json_success([
-            'postcode' => $postcode
-        ]);
-    }
-
-    /**
-     * AJAX endpoint para obter dados do carrinho e status do frete
-     *
-     * @since 4.11.0
-     * @access public
-     * @return void JSON com status do frete gratuito e total do carrinho
-     */
-    public function wc_better_get_cart_shipping_status() {
-        // Verifica se WooCommerce está disponível
-        if (!$this->is_valid_woocommerce_context() || !WC()->cart) {
-            wp_send_json_error([
-                'error' => true,
-                'message' => 'WooCommerce não está disponível.'
-            ], 400);
-        }
-
-        $cart = WC()->cart;
-        $customer = WC()->customer;
-        
-        // Dados básicos do carrinho
-        $calc_base = get_option('woo_better_free_shipping_calc_base', 'subtotal');
-        if ($calc_base === 'total') {
-            // Subtotal - cupons de desconto (juros não entram)
-            $cart_total = (float) $cart->get_subtotal()
-                - (float) $cart->get_discount_total();
-        } else {
-            $cart_total = $cart->get_displayed_subtotal();
-        }
-        $has_free_shipping = false;
-        $is_free_shipping_by_product_rate = false;
-        
-        // Verifica se há métodos de envio disponíveis e se algum é gratuito
-        if ($customer && method_exists($customer, 'get_shipping_postcode') && !empty($customer->get_shipping_postcode())) {
-            // Força o cálculo das taxas de envio (pode já ter sido chamado acima)
-            $cart->calculate_shipping();
-            
-            // Obtém pacotes de envio
-            $packages = $cart->get_shipping_packages();
-            
-            foreach ($packages as $package_key => $package) {
-                $session_key = 'shipping_for_package_' . $package_key;
-                $stored_rates = WC()->session->get($session_key);
-                
-                if (!empty($stored_rates['rates'])) {
-                    foreach ($stored_rates['rates'] as $rate_id => $rate) {
-                        // Verifica se existe frete grátis DISPONÍVEL (não precisa estar selecionado)
-                        if (floatval($rate->cost) === 0.0) {
-                            $has_free_shipping = true;
-                            // Verifica se o label da rate contém "Frete Grátis (Produto)" (criado pelo nosso plugin)
-                            if (method_exists($rate, 'get_label') && strpos($rate->get_label(), 'Frete Grátis (Produto)') !== false) {
-                                $is_free_shipping_by_product_rate = true;
-                            }
-                            break 2; // Sai dos dois loops - encontrou frete grátis disponível
-                        }
-                    }
-                }
-            }
-        }
-
-        wp_send_json_success([
-            'freeShipping' => $has_free_shipping,
-            'cartTotal' => $cart_total,
-            'freeShippingByProduct' => $is_free_shipping_by_product_rate
-        ]);
-    }
-
-    /**
-     * Registers the shipping address and calculates shipping rates for a product.
-     *
-     * @since 1.0.0
-     * @access public
-     *
-     * @param intern Address and Nonce.
-     *
-     * @return void Outputs a JSON response with:
-     * - message (string): Success or error message.
-     * - product (array): Product information (name, quantity, currency, etc.).
-     * - shipping_rates (array): Calculated shipping rates.
-     */
-    public function lkn_register_product_address(): void
-    {
-        // Captura e sanitiza o nonce do cabeçalho
-        $nonce = isset($_SERVER['HTTP_NONCE']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_NONCE'])) : '';
-
-        // Valida o nonce
-        if (!wp_verify_nonce($nonce, 'woo_better_register_product_address')) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'Requisição não autorizada.',
-            ), 403);
-        }
-
-        // Verifica se WooCommerce está carregado
-        if (!function_exists('WC')) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'WooCommerce não está carregado.',
-            ), 500);
-        }
-
-        // Obtém os dados de envio enviados pela requisição
-        $shipping = isset($_POST['shipping']) && is_array($_POST['shipping']) 
-            ? array_map('sanitize_text_field', wp_unslash($_POST['shipping'])) 
-            : array();
-
-        // Sanitiza os dados do array de envio
-        if (is_array($shipping)) {
-            $shipping = array_map('sanitize_text_field', $shipping);
-        }
-
-        // Verifica se os dados de envio estão presentes e são válidos
-        if (empty($shipping) || !is_array($shipping)) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'O parâmetro "shipping" é obrigatório e deve ser um array.',
-            ), 400);
-        }
-
-        // Sanitiza os dados de envio
-        $shipping_data = array(
-            'first_name'  => isset($shipping['first_name']) ? sanitize_text_field($shipping['first_name']) : null,
-            'last_name'   => isset($shipping['last_name']) ? sanitize_text_field($shipping['last_name']) : null,
-            'company'     => isset($shipping['company']) ? sanitize_text_field($shipping['company']) : null,
-            'address_1'   => isset($shipping['address_1']) ? sanitize_text_field($shipping['address_1']) : null,
-            'address_2'   => isset($shipping['address_2']) ? sanitize_text_field($shipping['address_2']) : null,
-            'city'        => isset($shipping['city']) ? sanitize_text_field($shipping['city']) : null,
-            'state'       => isset($shipping['state']) ? sanitize_text_field($shipping['state']) : null,
-            'postcode'    => isset($shipping['postcode']) ? sanitize_text_field($shipping['postcode']) : null,
-            'country'     => isset($shipping['country']) ? sanitize_text_field($shipping['country']) : 'BR',
-            'phone'       => isset($shipping['phone']) ? sanitize_text_field($shipping['phone']) : null,
-        );
-
-        // Define as propriedades do cliente com os dados de envio e replica para cobrança
-        WC()->customer->set_props(
-            array(
-                'shipping_first_name' => $shipping_data['first_name'],
-                'shipping_last_name'  => $shipping_data['last_name'],
-                'shipping_company'    => $shipping_data['company'],
-                'shipping_address_1'  => $shipping_data['address_1'],
-                'shipping_address_2'  => $shipping_data['address_2'],
-                'shipping_city'       => $shipping_data['city'],
-                'shipping_state'      => $shipping_data['state'],
-                'shipping_postcode'   => $shipping_data['postcode'],
-                'shipping_country'    => $shipping_data['country'],
-                'shipping_phone'      => $shipping_data['phone'],
-                'billing_first_name'  => $shipping_data['first_name'],
-                'billing_last_name'   => $shipping_data['last_name'],
-                'billing_company'     => $shipping_data['company'],
-                'billing_address_1'   => $shipping_data['address_1'],
-                'billing_address_2'   => $shipping_data['address_2'],
-                'billing_city'        => $shipping_data['city'],
-                'billing_state'       => $shipping_data['state'],
-                'billing_postcode'    => $shipping_data['postcode'],
-                'billing_country'     => $shipping_data['country'],
-                'billing_phone'       => $shipping_data['phone'],
-            )
-        );
-
-        // Salva os dados do cliente
-        WC()->customer->save();
-        
-        // Obtém o ID do produto da página atual
-        $product_id = isset($_POST['product_id']) ? absint($_POST['product_id']) : 0;
-        $variation_id = isset($_POST['variation_id']) ? absint($_POST['variation_id']) : 0;
-
-        if (!$product_id || !get_post($product_id)) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'Produto inválido ou não encontrado.',
-            ), 400);
-        }
-
-        // Obtém o produto (variação se fornecida, senão produto principal)
-        if ($variation_id > 0) {
-            $product = wc_get_product($variation_id);
-            if (!$product || $product->get_parent_id() !== $product_id) {
-                wp_send_json_error(array(
-                    'status' => false,
-                    'message' => 'Variação de produto inválida.',
-                ), 400);
-            }
-        } else {
-            $product = wc_get_product($product_id);
-        }
-
-        if (!$product) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'Produto não encontrado.',
-            ), 400);
-        }
-
-        // Verifica se o produto é digital (virtual ou para download)
-        if ($product->is_virtual() || $product->is_downloadable()) {
-            wp_send_json_success(array(
-                'status' => true,
-                'digital' => true,
-                'product_name' => $product->get_name(),
-                'message' => 'O produto é digital ou baixável e não requer cálculo de frete.',
-            ), 200);
-        }
-
-        // Converte o preço para float para garantir que seja numérico
-        $product_price = floatval($product->get_price());
-        
-        // Captura a quantidade enviada via POST ou usa 1 como padrão
-        $quantity = isset($_POST['quantity']) ? absint(wp_unslash($_POST['quantity'])) : 1;
-        if ($quantity <= 0) {
-            $quantity = 1; // Garante que a quantidade seja pelo menos 1
-        }
-        
-        $line_total = $product_price * $quantity;
-
-        // 1. Cria uma chave simulada única para não dar conflito
-        $simulated_key = 'simulated_' . wp_rand(1000, 99999);
-
-        // Estrutura EXATA de um item no carrinho do WooCommerce (evita quebra de plugins)
-        $simulated_item = array(
-            'key'               => $simulated_key,
-            'product_id'        => $product_id,
-            'variation_id'      => $variation_id,
-            'variation'         => array(),
-            'quantity'          => $quantity,
-            'data'              => $product,
-            'line_total'        => $line_total,
-            'line_subtotal'     => $line_total,
-            'line_tax'          => 0,
-            'line_subtotal_tax' => 0,
-            'line_tax_data'     => array('total' => array(), 'subtotal' => array()),
-        );
-
-        // 2. Salva o carrinho ORIGINAL do usuário (apenas na memória do servidor)
-        $original_cart_contents = WC()->cart->cart_contents;
-
-        // 3. Substitui TEMPORARIAMENTE o carrinho apenas com o nosso item simulado
-        // Isso resolve o erro do Melhor Envio que tenta ler direto do WC()->cart
-        WC()->cart->cart_contents = array( $simulated_key => $simulated_item );
-
-        // 4. Monta o pacote referenciando o carrinho que acabamos de injetar
-        $package = array(
-            'contents'        => WC()->cart->cart_contents,
-            'contents_cost'   => $line_total,
-            'applied_coupons' => array(),
-            'user'            => array(
-                'ID' => get_current_user_id(),
-            ),
-            'destination'     => array(
-                'country'   => $shipping_data['country'],
-                'state'     => $shipping_data['state'],
-                'postcode'  => $shipping_data['postcode'],
-                'city'      => $shipping_data['city'],
-                'address_1'   => $shipping_data['address_1'],
-                'address_2' => $shipping_data['address_2'],
-            ),
-        );
-
-        // 5. Calcula o frete para este pacote
-        // Define a flag para que lkn_woo_better_control_rates saiba que está no contexto
-        // de produto único e use o contents_cost do pacote em vez do subtotal do carrinho.
-        $this->is_product_address_calculation = true;
-        $shipping = WC()->shipping();
-        $shipping->load_shipping_methods();
-        $calculated_package = $shipping->calculate_shipping_for_package( $package, 0 );
-        $this->is_product_address_calculation = false;
-
-        // 6. RESTAURA O CARRINHO ORIGINAL DO USUÁRIO IMEDIATAMENTE!
-        // Como não usamos o set_session(), o banco de dados do cliente não é tocado.
-        WC()->cart->cart_contents = $original_cart_contents;
-
-        // Extração dos dados de frete para retornar na API
-        $shipping_rates = array();
-        $currency_symbol = get_woocommerce_currency_symbol();
-        $currency_minor_unit = wc_get_price_decimals();
-
-        $product_info = array(
-            'name'                => $product->get_name(),
-            'quantity'            => $quantity, 
-            'currency_symbol'     => $currency_symbol,
-            'currency_minor_unit' => $currency_minor_unit,
-        );
-
-        // Filtra as opções de envio devolvidas pelo Melhor Envio e demais métodos
-        if ( isset( $calculated_package['rates'] ) && is_array( $calculated_package['rates'] ) ) {
-            foreach ( $calculated_package['rates'] as $rate ) {
-                $shipping_rates[] = array(
-                    'id'        => $rate->get_id(),
-                    'label'     => $rate->get_label(),
-                    'cost'      => $rate->get_cost(),
-                    'meta_data' => $rate->get_meta_data(),
-                );
-            }
-        }
-
-        // Garante que a sessão do WooCommerce está inicializada, mesmo sem produtos no carrinho
-        if (!WC()->session->has_session()) {
-            WC()->session->set_customer_session_cookie(true);
-        }
-        
-        // Garante que o customer está inicializado
-        if (!WC()->customer) {
-            WC()->initialize_session();
-        }
-
-        if (!is_null($shipping_data['address_1'])) {
-            WC()->customer->set_shipping_address_1($shipping_data['address_1']);
-            WC()->customer->set_billing_address_1($shipping_data['address_1']);
-        }
-        if (!is_null($shipping_data['address_2'])) {
-            WC()->customer->set_shipping_address_2($shipping_data['address_2']);
-            WC()->customer->set_billing_address_2($shipping_data['address_2']);
-        }
-        if (!is_null($shipping_data['city'])) {
-            WC()->customer->set_shipping_city($shipping_data['city']);
-            WC()->customer->set_billing_city($shipping_data['city']);
-        }
-        if (!is_null($shipping_data['state'])) {
-            WC()->customer->set_shipping_state($shipping_data['state']);
-            WC()->customer->set_billing_state($shipping_data['state']);
-        }
-        if (!is_null($shipping_data['postcode'])) {
-            WC()->customer->set_shipping_postcode($shipping_data['postcode']);
-            WC()->customer->set_billing_postcode($shipping_data['postcode']);
-        }
-        if (!is_null($shipping_data['country'])) {
-            WC()->customer->set_shipping_country('BR');
-            WC()->customer->set_billing_country('BR');
-        }
-
-        WC()->customer->save();
-        
-        // Força a persistência dos dados na sessão, especialmente quando não há carrinho ativo
-        WC()->session->save_data();
-
-        // Retorna o JSON de sucesso
-        wp_send_json_success(array(
-            'message'        => 'Endereço de envio registrado com sucesso e frete calculado.',
-            'product'        => $product_info,
-            'shipping_rates' => $shipping_rates,
-        ));
-    }
-
-    /**
-     * Processes the cart and calculates shipping rates for the items in the cart.
-     *
-     * @since 1.0.0
-     * @access public
-     *
-     * @param intern Address and Nonce.
-     *
-     * @return void Outputs a JSON response with:
-     * - message (string): Success or error message.
-     * - cart (array): Cart details including products, quantities, and totals.
-     * - shipping_rates (array): Calculated shipping rates for the cart.
-     */
-    public function lkn_register_cart_address(): void
-    {
-        // Captura e sanitiza o nonce do cabeçalho
-        $nonce = isset($_SERVER['HTTP_NONCE']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_NONCE'])) : '';
-
-        // Valida o nonce
-        if (!wp_verify_nonce($nonce, 'woo_better_register_cart_address')) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'Requisição não autorizada.',
-            ), 403);
-        }
-
-        // Verifica se WooCommerce está carregado
-        if (!function_exists('WC')) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'WooCommerce não está carregado.',
-            ), 500);
-        }
-
-        // Obtém os dados de envio enviados pela requisição
-        $shipping = isset($_POST['shipping']) && is_array($_POST['shipping']) 
-            ? array_map('sanitize_text_field', wp_unslash($_POST['shipping'])) 
-            : array();
-
-        // Verifica se os dados de envio estão presentes e são válidos
-        if (empty($shipping) || !is_array($shipping)) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'O parâmetro "shipping" é obrigatório e deve ser um array.',
-            ), 400);
-        }
-
-        // Sanitiza os dados de envio
-        $shipping_data = array(
-            'first_name'  => isset($shipping['first_name']) ? sanitize_text_field($shipping['first_name']) : null,
-            'last_name'   => isset($shipping['last_name']) ? sanitize_text_field($shipping['last_name']) : null,
-            'company'     => isset($shipping['company']) ? sanitize_text_field($shipping['company']) : null,
-            'address_1'   => isset($shipping['address_1']) ? sanitize_text_field($shipping['address_1']) : null,
-            'address_2'   => isset($shipping['address_2']) ? sanitize_text_field($shipping['address_2']) : null,
-            'city'        => isset($shipping['city']) ? sanitize_text_field($shipping['city']) : null,
-            'state'       => isset($shipping['state']) ? sanitize_text_field($shipping['state']) : null,
-            'postcode'    => isset($shipping['postcode']) ? sanitize_text_field($shipping['postcode']) : null,
-            'country'     => isset($shipping['country']) ? sanitize_text_field($shipping['country']) : 'BR',
-            'phone'       => isset($shipping['phone']) ? sanitize_text_field($shipping['phone']) : null,
-        );
-
-        // Define as propriedades do cliente com os dados de envio e replica para cobrança
-        WC()->customer->set_props(
-            array(
-                'shipping_first_name' => $shipping_data['first_name'],
-                'shipping_last_name'  => $shipping_data['last_name'],
-                'shipping_company'    => $shipping_data['company'],
-                'shipping_address_1'  => $shipping_data['address_1'],
-                'shipping_address_2'  => $shipping_data['address_2'],
-                'shipping_city'       => $shipping_data['city'],
-                'shipping_state'      => $shipping_data['state'],
-                'shipping_postcode'   => $shipping_data['postcode'],
-                'shipping_country'    => $shipping_data['country'],
-                'shipping_phone'      => $shipping_data['phone'],
-                'billing_first_name'  => $shipping_data['first_name'],
-                'billing_last_name'   => $shipping_data['last_name'],
-                'billing_company'     => $shipping_data['company'],
-                'billing_address_1'   => $shipping_data['address_1'],
-                'billing_address_2'   => $shipping_data['address_2'],
-                'billing_city'        => $shipping_data['city'],
-                'billing_state'       => $shipping_data['state'],
-                'billing_postcode'    => $shipping_data['postcode'],
-                'billing_country'     => $shipping_data['country'],
-                'billing_phone'       => $shipping_data['phone'],
-            )
-        );
-
-        // Salva os dados do cliente
-        WC()->customer->save();
-        
-        // para que os dados apareçam corretos na página de profile do WordPress
-        if (is_user_logged_in()) {
-            $user_id = get_current_user_id();
-            
-            // Atualiza os campos de endereço de entrega nos user meta
-            if (!is_null($shipping_data['first_name'])) {
-                update_user_meta($user_id, 'shipping_first_name', $shipping_data['first_name']);
-            }
-            if (!is_null($shipping_data['last_name'])) {
-                update_user_meta($user_id, 'shipping_last_name', $shipping_data['last_name']);
-            }
-            if (!is_null($shipping_data['company'])) {
-                update_user_meta($user_id, 'shipping_company', $shipping_data['company']);
-            }
-            if (!is_null($shipping_data['address_1'])) {
-                update_user_meta($user_id, 'shipping_address_1', $shipping_data['address_1']);
-            }
-            // shipping_address_2 sempre vazio
-            update_user_meta($user_id, 'shipping_address_2', '');
-
-            if (!is_null($shipping_data['city'])) {
-                update_user_meta($user_id, 'shipping_city', $shipping_data['city']);
-            }
-            if (!is_null($shipping_data['state'])) {
-                update_user_meta($user_id, 'shipping_state', $shipping_data['state']);
-            }
-            if (!is_null($shipping_data['postcode'])) {
-                update_user_meta($user_id, 'shipping_postcode', $shipping_data['postcode']);
-            }
-            if (!is_null($shipping_data['country'])) {
-                update_user_meta($user_id, 'shipping_country', $shipping_data['country']);
-            }
-            if (!is_null($shipping_data['phone'])) {
-                update_user_meta($user_id, 'shipping_phone', $shipping_data['phone']);
-            }
-            // shipping_neighborhood sempre vazio
-            update_user_meta($user_id, 'shipping_neighborhood', '');
-            // shipping_number sempre vazio
-            update_user_meta($user_id, 'shipping_number', '');
-            
-            // Atualiza os campos de endereço de cobrança nos user meta
-            if (!is_null($shipping_data['first_name'])) {
-                update_user_meta($user_id, 'billing_first_name', $shipping_data['first_name']);
-            }
-            if (!is_null($shipping_data['last_name'])) {
-                update_user_meta($user_id, 'billing_last_name', $shipping_data['last_name']);
-            }
-            if (!is_null($shipping_data['company'])) {
-                update_user_meta($user_id, 'billing_company', $shipping_data['company']);
-            }
-            if (!is_null($shipping_data['address_1'])) {
-                update_user_meta($user_id, 'billing_address_1', $shipping_data['address_1']);
-            }
-            // billing_address_2 sempre vazio
-            update_user_meta($user_id, 'billing_address_2', '');
-
-            if (!is_null($shipping_data['city'])) {
-                update_user_meta($user_id, 'billing_city', $shipping_data['city']);
-            }
-            if (!is_null($shipping_data['state'])) {
-                update_user_meta($user_id, 'billing_state', $shipping_data['state']);
-            }
-            if (!is_null($shipping_data['postcode'])) {
-                update_user_meta($user_id, 'billing_postcode', $shipping_data['postcode']);
-            }
-            if (!is_null($shipping_data['country'])) {
-                update_user_meta($user_id, 'billing_country', $shipping_data['country']);
-            }
-            if (!is_null($shipping_data['phone'])) {
-                update_user_meta($user_id, 'billing_phone', $shipping_data['phone']);
-            }
-            // billing_neighborhood sempre vazio  
-            update_user_meta($user_id, 'billing_neighborhood', '');
-            // billing_number sempre vazio
-            update_user_meta($user_id, 'billing_number', '');
-        }
-
-        // Obtém os itens do carrinho
-        $cart_items = WC()->cart->get_cart();
-
-        if (empty($cart_items)) {
-            wp_send_json_error(array(
-                'status' => false,
-                'message' => 'O carrinho está vazio.',
-            ), 400);
-        }
-
-        $only_digital = true;
-        foreach ($cart_items as $cart_item) {
-            $product = $cart_item['data'];
-            if (!$product->is_virtual() && !$product->is_downloadable()) {
-                $only_digital = false;
-                break;
-            }
-        }
-
-        if ($only_digital) {
-            $cart_count = WC()->cart->get_cart_contents_count();
-
-            // Define a mensagem com base na quantidade de produtos
-            $message = $cart_count === 1
-                ? 'O produto no carrinho é digital ou baixável e não requer cálculo de frete.'
-                : 'Todos os produtos no carrinho são digitais ou baixáveis e não requerem cálculo de frete.';
-
-            wp_send_json_success(array(
-                'status' => true,
-                'digital' => true,
-                'cart_count' => $cart_count,
-                'message' => $message,
-            ), 200);
-        }
-
-        // Calcula o total do carrinho
-        $contents_cost = 0;
-        foreach ($cart_items as $cart_item) {
-            $contents_cost += floatval($cart_item['line_total']);
-        }
-
-        // Cria um pacote de envio personalizado com os itens do carrinho
-        $package = array(
-            'contents' => $cart_items,
-            'contents_cost' => $contents_cost,
-            'applied_coupons' => WC()->cart->get_applied_coupons(),
-            'user' => array(
-                'ID' => get_current_user_id(),
-            ),
-            'destination' => array(
-                'country'   => $shipping_data['country'],
-                'state'     => $shipping_data['state'],
-                'postcode'  => $shipping_data['postcode'],
-                'city'      => $shipping_data['city'],
-                'address_1'   => $shipping_data['address_1'],
-                'address_2' => $shipping_data['address_2'],
-            ),
-        );
-
-         // Calcula o frete usando a sessão do WooCommerce
-        // Isto garantirá que todos os hooks sejam executados
-        WC()->shipping()->reset_shipping();
-
-        // Define o endereço de entrega na sessão
-        WC()->customer->set_shipping_location(
-            $shipping_data['country'],
-            $shipping_data['state'], 
-            $shipping_data['postcode'],
-            $shipping_data['city']
-        );
-
-        // Força recalcular totais para aplicar hooks de frete
-        WC()->cart->calculate_totals();
-        
-        // Obtém os pacotes de envio calculados
-        $packages = WC()->shipping()->get_packages();
-        
-        $shipping_rates = array();
-        $currency_symbol = get_woocommerce_currency_symbol();
-        $currency_minor_unit = wc_get_price_decimals();
-            
-            // Itera pelos pacotes e extrai as taxas de envio
-            foreach ($packages as $package) {
-                if (isset($package['rates']) && is_array($package['rates'])) {
-                    foreach ($package['rates'] as $rate) {
-                        $shipping_rates[] = array(
-                            'id'        => $rate->get_id(),
-                            'label'     => $rate->get_label(),
-                            'cost'      => $rate->get_cost(),
-                            'meta_data' => $rate->get_meta_data(),
-                        );
-                }
-            }
-        }
-
-        $total_quantity = 0;
-
-        foreach (WC()->cart->get_cart() as $cart_item) {
-            $total_quantity += $cart_item['quantity'];
-        }
-
-        // Retorna os valores calculados
-        wp_send_json_success(array(
-            'message' => 'Endereço de envio registrado com sucesso e frete calculado.',
-            'cart' => array(
-                'currency_symbol' => $currency_symbol,
-                'currency_minor_unit' => $currency_minor_unit,
-                'quantity' => $total_quantity
-            ),
-            'shipping_rates' => $shipping_rates, // Taxas de envio
-        ));
-    }
-
-    /**
      * Run the loader to execute all of the hooks with WordPress.
      *
      * @since    1.0.0
@@ -6130,46 +4697,6 @@ class WcBetterShippingCalculatorForBrazil
     public function get_version()
     {
         return $this->version;
-    }
-
-    public function lkn_get_state_name_from_sigla($sigla)
-    {
-        $estados = array(
-            'AC' => 'Acre',
-            'AL' => 'Alagoas',
-            'AP' => 'Amapá',
-            'AM' => 'Amazonas',
-            'BA' => 'Bahia',
-            'CE' => 'Ceará',
-            'DF' => 'Distrito Federal',
-            'ES' => 'Espírito Santo',
-            'GO' => 'Goiás',
-            'MA' => 'Maranhão',
-            'MT' => 'Mato Grosso',
-            'MS' => 'Mato Grosso do Sul',
-            'MG' => 'Minas Gerais',
-            'PA' => 'Pará',
-            'PB' => 'Paraíba',
-            'PR' => 'Paraná',
-            'PE' => 'Pernambuco',
-            'PI' => 'Piauí',
-            'RJ' => 'Rio de Janeiro',
-            'RN' => 'Rio Grande do Norte',
-            'RS' => 'Rio Grande do Sul',
-            'RO' => 'Rondônia',
-            'RR' => 'Roraima',
-            'SC' => 'Santa Catarina',
-            'SP' => 'São Paulo',
-            'SE' => 'Sergipe',
-            'TO' => 'Tocantins',
-        );
-
-        // Verifica se a sigla existe no array
-        if (array_key_exists($sigla, $estados)) {
-            return $estados[$sigla];
-        } else {
-            return $sigla;
-        }
     }
 
     /**
@@ -6554,7 +5081,11 @@ class WcBetterShippingCalculatorForBrazil
                 }
             }
 
-            // Verifica se o highlight está ativo e processa telefone customizado
+            // Campo unificado "custom" só existe no modo destaque (Destaque do
+            // Campo Telefone). No modo por-bloco os valores vêm de
+            // billing_phone_formatted/shipping_phone_formatted acima. Exigir o
+            // destaque evita que um custom_phone_formatted vazio (enviado só
+            // para satisfazer o schema) zere os dois telefones.
             $phone_highlight = get_option('woo_better_calc_contact_field_position', 'no');
             if ($phone_highlight === 'yes' && isset($phone_data['custom_phone_formatted'])) {
                 $custom_phone_formatted = sanitize_text_field($phone_data['custom_phone_formatted']);
@@ -7028,36 +5559,6 @@ class WcBetterShippingCalculatorForBrazil
     }
 
     /**
-     * Verifica se está rodando no WordPress Playground
-     * Compatível com multisite
-     * 
-     * @return bool
-     * @since 4.7.0
-     */
-    private function is_playground_environment()
-    {
-        // Método 1: Verifica URL atual (mais confiável)
-        $current_url = home_url();
-        
-        // Método 2: Para multisite, também verifica URL da rede
-        if (is_multisite()) {
-            $network_url = network_home_url();
-            if (strpos($network_url, 'playground.wordpress.net') !== false) {
-                return true;
-            }
-        }
-        
-        // Método 3: Verifica variáveis de servidor como backup
-        $server_name = isset($_SERVER['SERVER_NAME']) ? sanitize_text_field(wp_unslash($_SERVER['SERVER_NAME'])) : '';
-        if (strpos($server_name, 'playground.wordpress.net') !== false) {
-            return true;
-        }
-        
-        // Método principal
-        return strpos($current_url, 'playground.wordpress.net') !== false;
-    }
-    
-    /**
      * Adiciona campos personalizados nas seções de endereço de cobrança e entrega na página de perfil do usuário
      *
      * @param array $fields Array de campos do WooCommerce
@@ -7303,7 +5804,7 @@ class WcBetterShippingCalculatorForBrazil
         if ($phone_required === 'yes') {
             $priority = ($phone_highlight === 'yes') ? 2 : 90;
             $fields['billing_phone'] = array(
-                'label'       => __('Telefone', 'woo-better-shipping-calculator-for-brazil'),
+                'label'       => __('Celular/Telefone', 'woo-better-shipping-calculator-for-brazil'),
                 'placeholder' => __('(00) 00000-0000', 'woo-better-shipping-calculator-for-brazil'),
                 'required'    => true,
                 'class'       => array('form-row-wide'),
@@ -7474,8 +5975,8 @@ class WcBetterShippingCalculatorForBrazil
     }
 
     /**
-     * Remove a obrigatoriedade da IE e da empresa no envio da página
-     * "editar endereço" quando o documento enviado é um CPF.
+     * Remove a obrigatoriedade da IE no envio da página "editar endereço"
+     * quando o documento enviado é um CPF.
      *
      * O WooCommerce valida campos obrigatórios em WC_Form_Handler::save_address
      * lendo `required` do array retornado por `woocommerce_billing_fields`.
@@ -7585,7 +6086,7 @@ class WcBetterShippingCalculatorForBrazil
         if ($phone_required === 'yes') {
             $priority = ($phone_highlight === 'yes') ? 2 : 90;
             $fields['shipping_phone'] = array(
-                'label'       => __('Telefone', 'woo-better-shipping-calculator-for-brazil'),
+                'label'       => __('Celular/Telefone', 'woo-better-shipping-calculator-for-brazil'),
                 'placeholder' => __('(00) 00000-0000', 'woo-better-shipping-calculator-for-brazil'),
                 'required'    => true,
                 'class'       => array('form-row-wide'),

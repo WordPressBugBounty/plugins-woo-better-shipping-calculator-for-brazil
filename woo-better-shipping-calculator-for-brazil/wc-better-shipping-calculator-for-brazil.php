@@ -13,10 +13,10 @@
  * @package           WcBetterShippingCalculatorForBrazil
  *
  * @wordpress-plugin
- * Plugin Name:       Calculadora de Frete e Campos Checkout para o Brasil
+ * Plugin Name:       Campos Checkout Brasileiro para WooCommerce
  * Plugin URI:        https://www.linknacional.com.br/wordpress
- * Description:       Calculadora automática de Frete com CEP para Woocommerce. Sem necessidade de informar o Pais e estado. Compatível com Gutenberg e shortcodes. Ideal para Lojas Brasileiras.
- * Version:           4.17.6
+ * Description:       Brazilian checkout fields (CPF/CNPJ, address number, neighborhood and phone) with automatic CEP address pre-filling for WooCommerce.
+ * Version:           5.0.2
  * Author:            Link Nacional
  * Author URI:        https://linknacional.com.br/
  * Requires PHP:      8.2
@@ -46,7 +46,7 @@ if (! defined('WPINC')) {
  */
 // Consts
 if (! defined('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION')) {
-    define('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION', '4.17.6');
+    define('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION', '5.0.2');
 }
 
 if (! defined('WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_MIN_GIVE_VERSION')) {
