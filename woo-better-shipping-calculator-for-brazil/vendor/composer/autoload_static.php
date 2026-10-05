@@ -11,15 +11,15 @@ class ComposerStaticInit53372f395f36da4b3d5e44aa7137ffa9
     );
 
     public static $prefixLengthsPsr4 = array (
-        'l' =>
+        'l' => 
         array (
             'libphonenumber\\' => 15,
         ),
-        'S' =>
+        'S' => 
         array (
             'Symfony\\Polyfill\\Mbstring\\' => 26,
         ),
-        'L' =>
+        'L' => 
         array (
             'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => 51,
             'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => 49,
@@ -28,23 +28,23 @@ class ComposerStaticInit53372f395f36da4b3d5e44aa7137ffa9
     );
 
     public static $prefixDirsPsr4 = array (
-        'libphonenumber\\' =>
+        'libphonenumber\\' => 
         array (
             0 => __DIR__ . '/..' . '/giggsey/libphonenumber-for-php-lite/src',
         ),
-        'Symfony\\Polyfill\\Mbstring\\' =>
+        'Symfony\\Polyfill\\Mbstring\\' => 
         array (
             0 => __DIR__ . '/..' . '/symfony/polyfill-mbstring',
         ),
-        'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' =>
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\PublicView\\' => 
         array (
             0 => __DIR__ . '/../..' . '/Public',
         ),
-        'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' =>
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\Includes\\' => 
         array (
             0 => __DIR__ . '/../..' . '/Includes',
         ),
-        'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' =>
+        'Lkn\\WcBetterShippingCalculatorForBrazil\\Admin\\' => 
         array (
             0 => __DIR__ . '/../..' . '/Admin',
         ),
