@@ -526,10 +526,22 @@ class WcBetterShippingCalculatorForBrazil
                     : WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION;
             };
 
+            // "Desabilitado" apenas VISUAL (`window.wcBetterFakeDisabled`). REASON:
+            // um input com o atributo `disabled` NÃO vai no POST, então a option
+            // mantinha o valor antigo salvo e o recurso seguia ativo no checkout
+            // (tela mostrava "Não" + campo fantasma). Ver AGENTS.md § 7.
+            wp_enqueue_script(
+                'wc-better-calc-settings-fake-disabled',
+                WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Admin/jsCompiled/WcBetterShippingCalculatorForBrazilAdminFakeDisabled.COMPILED.js',
+                array(),
+                $asset_version('Admin/jsCompiled/WcBetterShippingCalculatorForBrazilAdminFakeDisabled.COMPILED.js'),
+                true
+            );
+
             wp_enqueue_script(
                 'wc-better-calc-settings-layout',
                 WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Admin/jsCompiled/WcBetterShippingCalculatorForBrazilAdminLayout.COMPILED.js',
-                array(),
+                array('wc-better-calc-settings-fake-disabled'),
                 $asset_version('Admin/jsCompiled/WcBetterShippingCalculatorForBrazilAdminLayout.COMPILED.js'),
                 true
             );
@@ -546,7 +558,7 @@ class WcBetterShippingCalculatorForBrazil
             wp_enqueue_script(
                 'wc-better-calc-footer-message',
                 WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Admin/jsCompiled/WcBetterShippingCalculatorForBrazilAdminSettings.COMPILED.js',
-                array(),
+                array('wc-better-calc-settings-fake-disabled'),
                 $asset_version('Admin/jsCompiled/WcBetterShippingCalculatorForBrazilAdminSettings.COMPILED.js'),
                 true
             );
@@ -555,7 +567,10 @@ class WcBetterShippingCalculatorForBrazil
                 'wc-better-calc-style-settings',
                 WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_URL . 'Admin/cssCompiled/WcBetterShippingCalculatorForBrazilAdminSettings.COMPILED.css',
                 array(),
-                WC_BETTER_SHIPPING_CALCULATOR_FOR_BRAZIL_VERSION,
+                // mtime: a classe `.woo-better-fake-disabled` (ver AGENTS.md § 7) foi
+                // adicionada dentro da MESMA versão — com a constante o navegador
+                // seguiria com o CSS antigo e o "desabilitado" ficaria sem estilo.
+                $asset_version('Admin/cssCompiled/WcBetterShippingCalculatorForBrazilAdminSettings.COMPILED.css'),
                 'all'
             );
 
@@ -4112,9 +4127,37 @@ class WcBetterShippingCalculatorForBrazil
      */
     public function get_phone_mode() {
         $mode    = get_option('woo_better_calc_phone_mode', 'phone_and_cellphone');
-        $allowed = array('disabled', 'phone_and_cellphone', 'cellphone_only', 'landline_only');
+        $allowed = array('disabled', 'disabled_native', 'phone_and_cellphone', 'cellphone_only', 'landline_only');
 
         return in_array($mode, $allowed, true) ? $mode : 'phone_and_cellphone';
+    }
+
+    /**
+     * Indica se o modo escolhido DESABILITA o telefone de verdade no checkout.
+     *
+     * Existem DOIS "desabilitar" distintos:
+     *
+     * - `disabled_native` — "Desabilitar o campo de telefone": o plugin DESABILITA
+     *   o telefone NATIVO do WooCommerce (`woocommerce_checkout_phone_field = hidden`)
+     *   e não gera campo próprio. É esta opção que realmente remove o telefone da
+     *   tela (clássico E blocos).
+     * - `disabled` — "Deixar a configuração nativa do WooCommerce": o plugin NÃO
+     *   gerencia o telefone; o que o lojista configurou no WooCommerce (toggle do
+     *   editor de blocos / Personalizar) é o que vale. Nenhum campo é gerado.
+     *
+     * @return bool
+     */
+    private function phone_mode_disables_native() {
+        return 'disabled_native' === $this->get_phone_mode();
+    }
+
+    /**
+     * Indica se o modo NÃO gerencia o telefone (nem campo próprio, nem celular).
+     *
+     * @return bool
+     */
+    private function phone_mode_is_unmanaged() {
+        return in_array($this->get_phone_mode(), array('disabled', 'disabled_native'), true);
     }
 
     /**
@@ -4129,7 +4172,7 @@ class WcBetterShippingCalculatorForBrazil
      * @return bool
      */
     private function phone_mode_hides_native_option() {
-        return 'disabled' !== $this->get_phone_mode();
+        return ! $this->phone_mode_is_unmanaged();
     }
 
     /**
@@ -4155,6 +4198,14 @@ class WcBetterShippingCalculatorForBrazil
      * @return bool
      */
     private function phone_mode_adds_cellphone_field() {
+        // Nos modos "deixar o nativo" e "desabilitar o telefone" o plugin não gera
+        // campo de celular nenhum — nem visível, nem oculto. Sem este curto-circuito
+        // uma option residual `enable_cellphone_field = yes` (de uma configuração
+        // anterior) continuava criando o "Celular" mesmo com o telefone desabilitado.
+        if ( $this->phone_mode_is_unmanaged() ) {
+            return false;
+        }
+
         if ( 'cellphone_only' === $this->get_phone_mode() ) {
             return true;
         }
@@ -4237,13 +4288,12 @@ class WcBetterShippingCalculatorForBrazil
             $previous = get_option('woo_better_calc_phone_field_previous', false);
             $owns_hidden = ($previous !== false);
 
-            // O woo-better só oculta o nativo quando ELE injeta o campo próprio do
-            // telefone — ou seja, em qualquer modo gerenciado (todos exceto
-            // "Desabilitar"). O "Destaque do Campo Telefone" apenas REPOSICIONA o
-            // campo do plugin; NÃO deve ocultar o nativo por conta própria (senão,
-            // no modo "Desabilitar" — que não injeta campo nenhum — o telefone
-            // sumiria). Por isso o gate é só o modo.
-            $should_hide = $this->phone_mode_hides_native_option();
+            // O woo-better oculta o nativo quando ELE injeta o campo próprio do
+            // telefone (modos gerenciados) OU quando o modo escolhido é "Desabilitar
+            // o campo de telefone" (disabled_native), que existe justamente para
+            // desligar o nativo. No modo "Deixar a configuração nativa do WooCommerce"
+            // (disabled) o sync não mexe: vale o que o lojista configurou no WC.
+            $should_hide = $this->phone_mode_hides_native_option() || $this->phone_mode_disables_native();
 
             if ($should_hide) {
                 if ($native_phone !== 'hidden') {
@@ -4299,7 +4349,9 @@ class WcBetterShippingCalculatorForBrazil
         }
 
         // Recurso desabilitado → não mexe no nativo (é restaurado ao original).
-        if (! $this->phone_mode_hides_native_option()) {
+        // Exceção: "Desabilitar o campo de telefone" (disabled_native) também dita o
+        // `hidden` — senão o toggle do editor de blocos reativaria o telefone.
+        if (! $this->phone_mode_hides_native_option() && ! $this->phone_mode_disables_native()) {
             return;
         }
 
@@ -6099,7 +6151,11 @@ class WcBetterShippingCalculatorForBrazil
         }
 
         // Adiciona o checkbox apenas se ambas as condições permitirem
-        if ($fill_checkout_address === 'no' || $cep_position === 'no') {
+        // Só adiciona o checkbox quando as DUAS opções estão explicitamente ligadas.
+        // REASON: a comparação negativa (`=== 'no'`) deixava qualquer valor fora do
+        // par yes/no — option vazia de um salvamento antigo, por exemplo — cair no
+        // ramo do "adiciona", e o checkbox aparecia no checkout com a opção desligada.
+        if ($fill_checkout_address !== 'yes' || $cep_position !== 'yes') {
             return $fields;
         }
 
