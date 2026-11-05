@@ -5,7 +5,7 @@ Tags: cep, checkout, cpf, cnpj, brasil
 Requires at least: 5.0
 Tested up to: 7.1
 Requires PHP: 8.2
-Stable tag: 5.2.3
+Stable tag: 5.2.4
 License: GPLv2 or later
 License URI: [https://www.gnu.org/licenses/gpl-2.0.html](https://www.gnu.org/licenses/gpl-2.0.html)
 
@@ -125,6 +125,11 @@ If you find any errors or have suggestions, please open an issue in our [GitHub 
 * [International Telephone Input](https://intl-tel-input.com/) - Phone number field with country code.
 
 == Changelog ==
+
+# 5.2.4 - 2026-11-05
+* Fix: the order and customer phone and cellphone are now saved with the number only, without the country code (DDI) — the format Bling accepts. If the customer types the +55 (or just 55), it is removed from the beginning of the number.
+* New: a dedicated country code field above the phone and cellphone on the order edit screen, on the user profile and on the account address edit screen. The country code still shows on the order receipt, on "My account > Orders" and on the admin customer details.
+* Tweak: on the checkout and on the account address edit screen the phone field opens with the number only and no longer rewrites what the customer types (the +55 is split off on save). With the country code mask enabled the code lives on the flag alone.
 
 # 5.2.3 - 2026-10-27
 * Tweak: the phone field placeholder now follows the "Phone Field Behavior" — the landline format for "Landline Only", the mobile format for "Cellphone Only" and for the Cellphone field, and an area-code hint ("DDD + number") in the mode that accepts both formats. The "+55" was removed from the text: it is added automatically when the order is saved, and the customer never types it.
